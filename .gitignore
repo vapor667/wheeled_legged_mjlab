@@ -54,14 +54,19 @@ tests/
 !tests/
 tests/*
 !tests/test_representation_teacher_student_config.py
+!tests/test_visual_cts_data_probe.py
 !rsl_rl/tests/
 rsl_rl/tests/*
 !rsl_rl/tests/algorithms/
 rsl_rl/tests/algorithms/*
 !rsl_rl/tests/algorithms/test_representation_teacher_student_ppo.py
+!rsl_rl/tests/algorithms/test_visual_representation_teacher_student_ppo.py
 !rsl_rl/tests/models/
 rsl_rl/tests/models/*
 !rsl_rl/tests/models/test_representation_actor_critic.py
+!rsl_rl/tests/models/test_depth_height_estimator.py
+!rsl_rl/tests/models/test_height_representation_pair.py
+!rsl_rl/tests/models/test_visual_representation_actor_critic.py
 
 # Translations
 *.mo

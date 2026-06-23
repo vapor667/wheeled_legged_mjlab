@@ -68,7 +68,7 @@ class RepresentationTeacherStudentPPO:
         optimizer_cls = resolve_optimizer(optimizer)
         self.optimizer = optimizer_cls(self.actor.ppo_parameters(), lr=learning_rate)  # type: ignore
         self.proprio_optimizer = optimizer_cls(
-            self.actor.proprio_parameters(), lr=proprio_encoder_learning_rate
+            self.actor.representation_parameters(), lr=proprio_encoder_learning_rate
         )  # type: ignore
 
         self.storage = storage
@@ -198,8 +198,8 @@ class RepresentationTeacherStudentPPO:
                 self.proprio_optimizer.zero_grad()
                 representation_loss.backward()
                 if self.is_multi_gpu:
-                    self.reduce_parameters(self.actor.proprio_parameters())
-                nn.utils.clip_grad_norm_(self.actor.proprio_parameters(), self.max_grad_norm)
+                    self.reduce_parameters(self.actor.representation_parameters())
+                nn.utils.clip_grad_norm_(self.actor.representation_parameters(), self.max_grad_norm)
                 self.proprio_optimizer.step()
                 representation_loss_value += representation_loss.item()
             representation_loss_value /= self.num_proprio_encoder_substeps
