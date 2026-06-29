@@ -1,4 +1,4 @@
-"""Probe current Visual-CTS data prerequisites without changing training behavior."""
+"""Tests for Visual-CTS data prerequisites and training wiring."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ import unittest
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
+from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 
 import wheeled_legged_mjlab  # noqa: F401
+from rsl_rl.models import VisualRepresentationActorCritic
 from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_BUFFER_SIZE,
@@ -25,15 +26,16 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
 )
 
 
-TASK_ID = "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth"
+DEPTH_PROBE_TASK_ID = "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth"
+VISUAL_CTS_TASK_ID = "Mjlab-Velocity-Rough-WF-Tron1B-VisualCTS"
 
 
 class VisualCTSDataProbeTests(unittest.TestCase):
     def test_depth_height_and_history_are_available_but_not_training_inputs(self) -> None:
-        self.assertIn(TASK_ID, set(list_tasks()))
+        self.assertIn(DEPTH_PROBE_TASK_ID, set(list_tasks()))
 
-        env_cfg = load_env_cfg(TASK_ID)
-        agent = asdict(load_rl_cfg(TASK_ID))
+        env_cfg = load_env_cfg(DEPTH_PROBE_TASK_ID)
+        agent = asdict(load_rl_cfg(DEPTH_PROBE_TASK_ID))
 
         depth_group = env_cfg.observations[DEPTH_CAMERA_NAME]
         depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
@@ -82,6 +84,29 @@ class VisualCTSDataProbeTests(unittest.TestCase):
             },
         )
 
+    def test_visual_cts_task_routes_depth_into_training_config(self) -> None:
+        self.assertIn(VISUAL_CTS_TASK_ID, set(list_tasks()))
+
+        env_cfg = load_env_cfg(VISUAL_CTS_TASK_ID)
+        agent = asdict(load_rl_cfg(VISUAL_CTS_TASK_ID))
+
+        self.assertIn(DEPTH_CAMERA_NAME, env_cfg.observations)
+        self.assertEqual(agent["actor"]["class_name"], "VisualRepresentationActorCritic")
+        self.assertEqual(agent["algorithm"]["class_name"], "RepresentationTeacherStudentPPO")
+        self.assertEqual(
+            agent["obs_groups"],
+            {
+                "actor": ("actor",),
+                "critic": ("critic",),
+                "proprio_encoder": ("actor_history",),
+                "privileged_encoder": ("critic",),
+                "depth_encoder": (DEPTH_CAMERA_NAME,),
+            },
+        )
+        self.assertEqual(agent["actor"]["height_scan_start"], 49)
+        self.assertEqual(agent["actor"]["height_dim"], math.prod(TERRAIN_SCAN_GRID_SHAPE))
+        self.assertIsNotNone(load_runner_cls(VISUAL_CTS_TASK_ID))
+
     @unittest.skipUnless(
         os.environ.get("RUN_VISUAL_CTS_LIVE_PROBE") == "1",
         "set RUN_VISUAL_CTS_LIVE_PROBE=1 to initialize MuJoCo and inspect live observation shapes",
@@ -94,7 +119,7 @@ class VisualCTSDataProbeTests(unittest.TestCase):
         warp_cache_dir.mkdir(parents=True, exist_ok=True)
         wp.config.kernel_cache_dir = str(warp_cache_dir)
 
-        env_cfg = load_env_cfg(TASK_ID)
+        env_cfg = load_env_cfg(DEPTH_PROBE_TASK_ID)
         env_cfg.scene.num_envs = int(os.environ.get("VISUAL_CTS_PROBE_NUM_ENVS", "2"))
         device = os.environ.get("VISUAL_CTS_PROBE_DEVICE", "cpu")
         env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
@@ -134,6 +159,57 @@ class VisualCTSDataProbeTests(unittest.TestCase):
                 self.assertEqual(depth_shape[1], expected_depth_elements)
         finally:
             env.close()
+
+    @unittest.skipUnless(
+        os.environ.get("RUN_VISUAL_CTS_LIVE_TRAIN_SMOKE") == "1",
+        "set RUN_VISUAL_CTS_LIVE_TRAIN_SMOKE=1 to run one real Visual-CTS update",
+    )
+    def test_live_visual_cts_runner_completes_one_update(self) -> None:
+        import torch
+        import warp as wp
+        from mjlab.envs import ManagerBasedRlEnv
+        from mjlab.rl import RslRlVecEnvWrapper
+
+        warp_cache_dir = Path(os.environ.get("WARP_KERNEL_CACHE_DIR", "/tmp/warp-kernel-cache"))
+        warp_cache_dir.mkdir(parents=True, exist_ok=True)
+        wp.config.kernel_cache_dir = str(warp_cache_dir)
+
+        env_cfg = load_env_cfg(VISUAL_CTS_TASK_ID)
+        env_cfg.scene.num_envs = int(os.environ.get("VISUAL_CTS_PROBE_NUM_ENVS", "2"))
+        agent_cfg = asdict(load_rl_cfg(VISUAL_CTS_TASK_ID))
+        agent_cfg["num_steps_per_env"] = 2
+        agent_cfg["save_interval"] = 1000
+        agent_cfg["algorithm"]["num_learning_epochs"] = 1
+        agent_cfg["algorithm"]["num_mini_batches"] = 1
+
+        device = os.environ.get("VISUAL_CTS_PROBE_DEVICE", "cpu")
+        env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+        wrapped_env = None
+        try:
+            wrapped_env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg["clip_actions"])
+            runner_cls = load_runner_cls(VISUAL_CTS_TASK_ID)
+            self.assertIsNotNone(runner_cls)
+            runner = runner_cls(wrapped_env, agent_cfg, log_dir=None, device=device)
+            policy = runner.alg.get_policy()
+            self.assertIsInstance(policy, VisualRepresentationActorCritic)
+
+            estimator = policy.height_pair.student_height_estimator
+            before = {name: param.detach().clone() for name, param in estimator.named_parameters()}
+            runner.learn(num_learning_iterations=1)
+
+            self.assertTrue(
+                any(not torch.equal(before[name], param) for name, param in estimator.named_parameters())
+            )
+            obs = wrapped_env.get_observations()
+            with torch.inference_mode():
+                actions = policy(obs)
+            self.assertEqual(actions.shape, (wrapped_env.num_envs, wrapped_env.num_actions))
+            self.assertTrue(torch.isfinite(actions).all())
+        finally:
+            if wrapped_env is not None:
+                wrapped_env.close()
+            else:
+                env.close()
 
     def test_visual_cts_probe_is_not_git_ignored(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
