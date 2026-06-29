@@ -56,6 +56,12 @@ class HeightRepresentationPairTests(unittest.TestCase):
         self.assertEqual(output.student_height_latent.shape, (BATCH_SIZE, HEIGHT_LATENT_DIM))
         self.assertEqual(output.height_hat.shape, (BATCH_SIZE, HEIGHT_DIM))
         self.assertEqual(output.next_hidden_state.shape, (BATCH_SIZE, GRU_HIDDEN_DIM))
+        self.assertTrue(
+            torch.allclose(output.teacher_height_latent.norm(dim=-1), torch.ones(BATCH_SIZE), atol=1e-6)
+        )
+        self.assertTrue(
+            torch.allclose(output.student_height_latent.norm(dim=-1), torch.ones(BATCH_SIZE), atol=1e-6)
+        )
         self.assertEqual(set(losses), {"height_latent", "height_reconstruction", "height_total"})
         for loss in losses.values():
             self.assertEqual(loss.ndim, 0)

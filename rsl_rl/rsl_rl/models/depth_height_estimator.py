@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rsl_rl.modules import MLP
 
@@ -27,6 +28,7 @@ class DepthHeightEstimator(nn.Module):
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
         decoder_hidden_dims: tuple[int, ...] | list[int] = (128, 256),
         activation: str = "elu",
+        normalize_latent: bool = True,
     ) -> None:
         super().__init__()
         if proprio_history_dim <= 0:
@@ -43,6 +45,7 @@ class DepthHeightEstimator(nn.Module):
         self.height_dim = height_dim
         self.height_latent_dim = height_latent_dim
         self.gru_hidden_dim = gru_hidden_dim
+        self.normalize_latent = normalize_latent
 
         self.proprio_encoder = MLP(
             proprio_history_dim,
@@ -85,6 +88,8 @@ class DepthHeightEstimator(nn.Module):
         depth_feature = self.depth_encoder(depth)
         next_hidden_state = self.gru(torch.cat((proprio_feature, depth_feature), dim=-1), hidden_state)
         height_latent = self.latent_head(next_hidden_state)
+        if self.normalize_latent:
+            height_latent = F.normalize(height_latent, p=2.0, dim=-1)
         height_hat = self.height_decoder(height_latent)
         return height_latent, height_hat, next_hidden_state
 

@@ -17,7 +17,7 @@ from rsl_rl.utils import compile_model, resolve_callable, resolve_obs_groups, re
 
 
 class RepresentationTeacherStudentPPO:
-    """PPO on the privileged path plus representation alignment for the student encoder."""
+    """PPO with optional concurrent teacher/student rollout and representation alignment."""
 
     def __init__(
         self,
@@ -44,6 +44,7 @@ class RepresentationTeacherStudentPPO:
         symmetry_cfg: dict | None = None,
         multi_gpu_cfg: dict | None = None,
         share_cnn_encoders: bool = False,
+        teacher_student_ratio: float | None = None,
     ) -> None:
         if rnd_cfg is not None:
             raise ValueError("RND is not supported by RepresentationTeacherStudentPPO.")
@@ -90,11 +91,31 @@ class RepresentationTeacherStudentPPO:
         self.num_proprio_encoder_substeps = num_proprio_encoder_substeps
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
         self.rnd = None
+        self.teacher_mask = self._make_teacher_mask(storage.num_envs, teacher_student_ratio)
+        self._teacher_reward_sum = 0.0
+        self._student_reward_sum = 0.0
+        self._reward_sample_count = 0
 
     def act(self, obs: TensorDict) -> torch.Tensor:
-        self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
-        self.transition.actions = self.actor.act_teacher(obs, stochastic_output=True).detach()
-        self.transition.values = self.actor.evaluate_teacher(obs).detach()
+        actor_hidden_state = self.actor.get_hidden_state()
+        self.transition.hidden_states = (actor_hidden_state, None)
+        if self.teacher_mask is None:
+            self.transition.actions = self.actor.act_teacher(obs, stochastic_output=True).detach()
+            self.transition.values = self.actor.evaluate_teacher(obs).detach()
+        else:
+            self.transition.teacher_mask = self.teacher_mask
+            self.transition.actions = self.actor.act_mixed(
+                obs,
+                self.teacher_mask,
+                hidden_state=actor_hidden_state,
+                stochastic_output=True,
+                update_hidden_state=True,
+            ).detach()
+            self.transition.values = self.actor.evaluate_mixed(
+                obs,
+                self.teacher_mask,
+                hidden_state=actor_hidden_state,
+            ).detach()
         self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()
         self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
         self.transition.observations = obs
@@ -106,6 +127,11 @@ class RepresentationTeacherStudentPPO:
         self.actor.update_normalization(obs)
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
+        if self.teacher_mask is not None:
+            flat_rewards = rewards.view(-1)
+            self._teacher_reward_sum += flat_rewards[self.teacher_mask].mean().item()
+            self._student_reward_sum += flat_rewards[~self.teacher_mask].mean().item()
+            self._reward_sample_count += 1
         if "time_outs" in extras:
             self.transition.rewards += self.gamma * torch.squeeze(
                 self.transition.values * extras["time_outs"].unsqueeze(1).to(self.device),
@@ -114,11 +140,19 @@ class RepresentationTeacherStudentPPO:
         self.storage.add_transition(self.transition)
         self.transition.clear()
         self.actor.reset(dones)
-        self.critic.reset(dones)
+        if self.critic is not self.actor:
+            self.critic.reset(dones)
 
     def compute_returns(self, obs: TensorDict) -> None:
         st = self.storage
-        last_values = self.actor.evaluate_teacher(obs).detach()
+        if self.teacher_mask is None:
+            last_values = self.actor.evaluate_teacher(obs).detach()
+        else:
+            last_values = self.actor.evaluate_mixed(
+                obs,
+                self.teacher_mask,
+                hidden_state=self.actor.get_hidden_state(),
+            ).detach()
         advantage = 0
         for step in reversed(range(st.num_transitions_per_env)):
             next_values = last_values if step == st.num_transitions_per_env - 1 else st.values[step + 1]
@@ -134,7 +168,7 @@ class RepresentationTeacherStudentPPO:
         mean_value_loss = 0.0
         mean_surrogate_loss = 0.0
         mean_entropy = 0.0
-        mean_representation_loss = 0.0
+        mean_representation_losses: dict[str, float] = {}
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for batch in generator:
@@ -143,9 +177,23 @@ class RepresentationTeacherStudentPPO:
                 with torch.no_grad():
                     batch.advantages = (batch.advantages - batch.advantages.mean()) / (batch.advantages.std() + 1e-8)
 
-            self.actor.act_teacher(batch.observations, stochastic_output=True)
+            actor_hidden_state = batch.hidden_states[0]
+            if batch.teacher_mask is None:
+                self.actor.act_teacher(batch.observations, stochastic_output=True)
+                values = self.actor.evaluate_teacher(batch.observations)
+            else:
+                self.actor.act_mixed(
+                    batch.observations,
+                    batch.teacher_mask,
+                    hidden_state=actor_hidden_state,
+                    stochastic_output=True,
+                )
+                values = self.actor.evaluate_mixed(
+                    batch.observations,
+                    batch.teacher_mask,
+                    hidden_state=actor_hidden_state,
+                )
             actions_log_prob = self.actor.get_output_log_prob(batch.actions)
-            values = self.actor.evaluate_teacher(batch.observations)
             distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
             entropy = self.actor.output_entropy[:original_batch_size]
 
@@ -192,30 +240,46 @@ class RepresentationTeacherStudentPPO:
             nn.utils.clip_grad_norm_(self.actor.ppo_parameters(), self.max_grad_norm)
             self.optimizer.step()
 
-            representation_loss_value = 0.0
+            representation_loss_values: dict[str, float] = {}
             for _ in range(self.num_proprio_encoder_substeps):
-                representation_loss = self.actor.compute_representation_loss(batch.observations)
+                representation_losses = self.actor.compute_representation_losses(
+                    batch.observations,
+                    hidden_state=actor_hidden_state,
+                )
+                representation_loss = representation_losses["representation_total"]
                 self.proprio_optimizer.zero_grad()
                 representation_loss.backward()
                 if self.is_multi_gpu:
                     self.reduce_parameters(self.actor.representation_parameters())
                 nn.utils.clip_grad_norm_(self.actor.representation_parameters(), self.max_grad_norm)
                 self.proprio_optimizer.step()
-                representation_loss_value += representation_loss.item()
-            representation_loss_value /= self.num_proprio_encoder_substeps
+                for key, value in representation_losses.items():
+                    representation_loss_values[key] = representation_loss_values.get(key, 0.0) + value.item()
+            for key in representation_loss_values:
+                representation_loss_values[key] /= self.num_proprio_encoder_substeps
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy.mean().item()
-            mean_representation_loss += representation_loss_value
+            for key, value in representation_loss_values.items():
+                mean_representation_losses[key] = mean_representation_losses.get(key, 0.0) + value
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         loss_dict = {
             "value": mean_value_loss / num_updates,
             "surrogate": mean_surrogate_loss / num_updates,
             "entropy": mean_entropy / num_updates,
-            "representation": mean_representation_loss / num_updates,
+            "representation": mean_representation_losses["representation_total"] / num_updates,
         }
+        for key, value in mean_representation_losses.items():
+            if key not in {"representation_total", "height_total"}:
+                loss_dict[key] = value / num_updates
+        if self.teacher_mask is not None and self._reward_sample_count > 0:
+            loss_dict["CTS/teacher_mean_step_reward"] = self._teacher_reward_sum / self._reward_sample_count
+            loss_dict["CTS/student_mean_step_reward"] = self._student_reward_sum / self._reward_sample_count
+            self._teacher_reward_sum = 0.0
+            self._student_reward_sum = 0.0
+            self._reward_sample_count = 0
         self.storage.clear()
         return loss_dict
 
@@ -296,3 +360,18 @@ class RepresentationTeacherStudentPPO:
                 numel = param.numel()
                 param.grad.data.copy_(all_grads[offset : offset + numel].view_as(param.grad.data))
                 offset += numel
+
+    def _make_teacher_mask(
+        self, num_envs: int, teacher_student_ratio: float | None
+    ) -> torch.Tensor | None:
+        if teacher_student_ratio is None:
+            return None
+        if teacher_student_ratio <= 0.0:
+            raise ValueError(f"teacher_student_ratio must be positive, got {teacher_student_ratio}")
+        if num_envs < 2:
+            raise ValueError("Concurrent teacher-student training requires at least two environments")
+        teacher_fraction = teacher_student_ratio / (teacher_student_ratio + 1.0)
+        num_teacher_envs = min(max(int(num_envs * teacher_fraction), 1), num_envs - 1)
+        teacher_mask = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        teacher_mask[:num_teacher_envs] = True
+        return teacher_mask

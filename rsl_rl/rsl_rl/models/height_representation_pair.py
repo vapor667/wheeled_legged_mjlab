@@ -40,12 +40,14 @@ class HeightRepresentationPair(nn.Module):
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
         decoder_hidden_dims: tuple[int, ...] | list[int] = (128, 256),
         activation: str = "elu",
+        normalize_latent: bool = True,
     ) -> None:
         super().__init__()
         if height_dim <= 0:
             raise ValueError(f"height_dim must be positive, got {height_dim}")
         self.height_dim = height_dim
         self.height_latent_dim = height_latent_dim
+        self.normalize_latent = normalize_latent
 
         self.teacher_height_encoder = MLP(
             height_dim,
@@ -65,6 +67,7 @@ class HeightRepresentationPair(nn.Module):
             depth_channels=depth_channels,
             decoder_hidden_dims=decoder_hidden_dims,
             activation=activation,
+            normalize_latent=normalize_latent,
         )
 
     def forward(
@@ -75,7 +78,7 @@ class HeightRepresentationPair(nn.Module):
         hidden_state: torch.Tensor | None = None,
     ) -> HeightRepresentationOutput:
         self._check_height_scan(height_scan)
-        teacher_height_latent = self.teacher_height_encoder(height_scan)
+        teacher_height_latent = self.encode_teacher(height_scan)
         student_height_latent, height_hat, next_hidden_state = self.student_height_estimator(
             proprio_history,
             depth,
@@ -87,6 +90,11 @@ class HeightRepresentationPair(nn.Module):
             height_hat=height_hat,
             next_hidden_state=next_hidden_state,
         )
+
+    def encode_teacher(self, height_scan: torch.Tensor) -> torch.Tensor:
+        self._check_height_scan(height_scan)
+        latent = self.teacher_height_encoder(height_scan)
+        return F.normalize(latent, p=2.0, dim=-1) if self.normalize_latent else latent
 
     def compute_height_loss(
         self,

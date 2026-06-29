@@ -29,7 +29,7 @@ class RslRlVisualRepresentationModelCfg(RslRlRepresentationModelCfg):
     """Config for Visual-CTS representation actor-critic."""
 
     height_latent_dim: int = 32
-    height_scan_start: int = 49
+    height_scan_start: int | None = None
     height_dim: int = 121
     height_teacher_hidden_dims: Tuple[int, ...] = (256, 128)
     height_proprio_feature_dim: int = 64
@@ -38,6 +38,7 @@ class RslRlVisualRepresentationModelCfg(RslRlRepresentationModelCfg):
     height_proprio_hidden_dims: Tuple[int, ...] = (256, 128)
     height_depth_channels: Tuple[int, ...] = (16, 32, 32)
     height_decoder_hidden_dims: Tuple[int, ...] = (128, 256)
+    privileged_decoder_hidden_dims: Tuple[int, ...] = (128, 256)
     class_name: str = "VisualRepresentationActorCritic"
 
 
@@ -47,6 +48,7 @@ class RslRlRepresentationTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
     proprio_encoder_learning_rate: float = 1.0e-3
     num_proprio_encoder_substeps: int = 1
+    teacher_student_ratio: float | None = None
     class_name: str = "RepresentationTeacherStudentPPO"
 
 
@@ -149,7 +151,7 @@ def wf_tron1b_visual_cts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             latent_dim=32,
             normalize_latent=True,
             height_latent_dim=32,
-            height_scan_start=49,
+            height_scan_start=None,
             height_dim=121,
             height_teacher_hidden_dims=(256, 128),
             height_proprio_feature_dim=64,
@@ -158,6 +160,7 @@ def wf_tron1b_visual_cts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             height_proprio_hidden_dims=(256, 128),
             height_depth_channels=(16, 32, 32),
             height_decoder_hidden_dims=(128, 256),
+            privileged_decoder_hidden_dims=(128, 256),
             distribution_cfg={
                 "class_name": "GaussianDistribution",
                 "init_std": 1.0,
@@ -179,13 +182,15 @@ def wf_tron1b_visual_cts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
             proprio_encoder_learning_rate=1.0e-3,
             num_proprio_encoder_substeps=1,
+            teacher_student_ratio=1.0,
         ),
         obs_groups={
             "actor": ("actor",),
             "critic": ("critic",),
             "proprio_encoder": ("actor_history",),
-            "privileged_encoder": ("critic",),
+            "privileged_encoder": ("privileged",),
             "depth_encoder": ("depth_camera",),
+            "height_encoder": ("height_scan",),
         },
         experiment_name="wf_tron1b_velocity_visual_cts",
         save_interval=200,

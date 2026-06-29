@@ -47,6 +47,7 @@ class DepthHeightEstimatorTests(unittest.TestCase):
         self.assertEqual(height_latent.shape, (BATCH_SIZE, HEIGHT_LATENT_DIM))
         self.assertEqual(height_hat.shape, (BATCH_SIZE, HEIGHT_DIM))
         self.assertEqual(next_hidden.shape, (BATCH_SIZE, GRU_HIDDEN_DIM))
+        self.assertTrue(torch.allclose(height_latent.norm(dim=-1), torch.ones(BATCH_SIZE), atol=1e-6))
 
     def test_forward_uses_provided_hidden_state_and_updates_it(self) -> None:
         estimator = self.make_estimator()

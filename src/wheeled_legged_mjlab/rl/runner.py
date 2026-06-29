@@ -8,7 +8,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
-from rsl_rl.models import RepresentationActorCritic
+from rsl_rl.models import RepresentationActorCritic, VisualRepresentationActorCritic
 
 
 def _action_scale_values(action_term) -> list[float]:
@@ -68,6 +68,21 @@ def get_wheeled_legged_metadata(
                 "proprio_observation_names": env.observation_manager.active_terms["actor_history"],
                 "proprio_history_length": str(actor_history_cfg.history_length),
                 "proprio_flatten_history_dim": str(actor_history_cfg.flatten_history_dim).lower(),
+            }
+        )
+    elif isinstance(policy, VisualRepresentationActorCritic):
+        actor_history_cfg = env.cfg.observations["actor_history"]
+        metadata.update(
+            {
+                "policy_input_names": ["actor_obs", "proprio_history", "depth", "hidden_state_in"],
+                "policy_output_names": ["actions", "hidden_state_out"],
+                "actor_observation_names": env.observation_manager.active_terms["actor"],
+                "proprio_observation_names": env.observation_manager.active_terms["actor_history"],
+                "proprio_history_length": str(actor_history_cfg.history_length),
+                "proprio_flatten_history_dim": str(actor_history_cfg.flatten_history_dim).lower(),
+                "depth_observation_name": policy.depth_obs_group,
+                "depth_shape": list(policy.depth_shape),
+                "gru_hidden_size": float(policy.height_pair.student_height_estimator.gru_hidden_dim),
             }
         )
     return metadata

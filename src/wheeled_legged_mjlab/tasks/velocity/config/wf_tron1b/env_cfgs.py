@@ -197,7 +197,9 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
     return tuple(sensors)
 
 
-def make_observations(*, rough: bool, depth: bool = False) -> dict[str, ObservationGroupCfg]:
+def make_observations(
+    *, rough: bool, depth: bool = False, separate_height_scan: bool = False
+) -> dict[str, ObservationGroupCfg]:
     """Actor uses deployable proprioception; critic keeps privileged state."""
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
@@ -259,6 +261,7 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
             params={"sensor_name": "wheels_ground_contact"},
         ),
     }
+    privileged_terms = dict(critic_terms)
 
     if rough:
         critic_terms["height_scan"] = ObservationTermCfg(
@@ -315,6 +318,25 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
                     },
                 )
             },
+            concatenate_terms=True,
+            enable_corruption=False,
+        )
+    if separate_height_scan:
+        if not rough:
+            raise ValueError("A separate height scan observation requires rough terrain")
+        observations["height_scan"] = ObservationGroupCfg(
+            terms={
+                "height_scan": ObservationTermCfg(
+                    func=mdp.height_scan,
+                    params={"sensor_name": "terrain_scan"},
+                    scale=0.1,
+                )
+            },
+            concatenate_terms=True,
+            enable_corruption=False,
+        )
+        observations["privileged"] = ObservationGroupCfg(
+            terms=privileged_terms,
             concatenate_terms=True,
             enable_corruption=False,
         )
@@ -504,7 +526,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "base_height": RewardTermCfg(
             func=mdp.base_height_l2,
-            weight=-5.0,
+            weight=-50.0,
             params={
                 "target_height": BASE_HEIGHT_TARGET,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
@@ -634,7 +656,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_wheel_foot_clearance": RewardTermCfg(
                     func=mdp.rough_wheel_foot_clearance,
-                    weight=2,
+                    weight=2.0,
                     params={
                         **roughness_params,
                         "clearance_sensor_name": "wheel_height_scan",
@@ -761,10 +783,16 @@ def make_viewer() -> ViewerConfig:
     )
 
 
-def make_env_cfg(*, rough: bool, play: bool = False, depth: bool = False) -> ManagerBasedRlEnvCfg:
+def make_env_cfg(
+    *, rough: bool, play: bool = False, depth: bool = False, separate_height_scan: bool = False
+) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
-        observations=make_observations(rough=rough, depth=depth),
+        observations=make_observations(
+            rough=rough,
+            depth=depth,
+            separate_height_scan=separate_height_scan,
+        ),
         actions=make_actions(),
         commands=make_commands(),
         events=make_events(),
@@ -821,6 +849,11 @@ def wf_tron1b_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def wf_tron1b_rough_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create WF-TRON1B rough-terrain configuration with a depth camera."""
     return make_env_cfg(rough=True, play=play, depth=True)
+
+
+def wf_tron1b_visual_cts_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create the Visual-CTS environment with explicit depth and terrain-height observations."""
+    return make_env_cfg(rough=True, play=play, depth=True, separate_height_scan=True)
 
 
 def wf_tron1b_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:

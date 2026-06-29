@@ -36,6 +36,7 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
                 "actor_history": torch.randn(NUM_ENVS, ACTOR_HISTORY_DIM),
                 "critic": torch.randn(NUM_ENVS, CRITIC_DIM),
                 "depth_camera": torch.randn(NUM_ENVS, *DEPTH_SHAPE),
+                "height_scan": torch.randn(NUM_ENVS, HEIGHT_DIM),
             },
             batch_size=[NUM_ENVS],
         )
@@ -49,13 +50,14 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
                 "proprio_encoder": ["actor_history"],
                 "privileged_encoder": ["critic"],
                 "depth_encoder": ["depth_camera"],
+                "height_encoder": ["height_scan"],
             },
             NUM_ACTIONS,
             hidden_dims=(16,),
             encoder_hidden_dims=(16,),
             latent_dim=4,
             height_latent_dim=4,
-            height_scan_start=HEIGHT_SCAN_START,
+            height_scan_start=None,
             height_dim=HEIGHT_DIM,
             height_teacher_hidden_dims=(16,),
             height_proprio_feature_dim=8,
@@ -64,6 +66,7 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
             height_proprio_hidden_dims=(16,),
             height_depth_channels=(4, 4),
             height_decoder_hidden_dims=(16,),
+            privileged_decoder_hidden_dims=(16,),
             distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
         )
 
@@ -81,6 +84,7 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
             proprio_encoder_learning_rate=1.0e-3,
             schedule="fixed",
             desired_kl=0.01,
+            teacher_student_ratio=1.0,
         )
         return alg, obs
 
@@ -102,16 +106,45 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
         critic_before = self.clone_named_parameters(alg.actor.critic_head)
         privileged_before = self.clone_named_parameters(alg.actor.privileged_encoder)
         proprio_before = self.clone_named_parameters(alg.actor.proprio_encoder)
+        privileged_decoder_before = self.clone_named_parameters(alg.actor.privileged_decoder)
         height_student_before = self.clone_named_parameters(alg.actor.height_pair.student_height_estimator)
 
         losses = alg.update()
 
-        self.assertIn("representation", losses)
+        self.assertTrue(
+            {
+                "representation",
+                "privileged_latent",
+                "privileged_reconstruction",
+                "privileged_total",
+                "height_latent",
+                "height_reconstruction",
+                "CTS/teacher_mean_step_reward",
+                "CTS/student_mean_step_reward",
+            }
+            <= set(losses)
+        )
         self.assertTrue(self.any_param_changed(actor_before, alg.actor.actor_head))
         self.assertTrue(self.any_param_changed(critic_before, alg.actor.critic_head))
         self.assertTrue(self.any_param_changed(privileged_before, alg.actor.privileged_encoder))
         self.assertTrue(self.any_param_changed(proprio_before, alg.actor.proprio_encoder))
+        self.assertTrue(self.any_param_changed(privileged_decoder_before, alg.actor.privileged_decoder))
         self.assertTrue(self.any_param_changed(height_student_before, alg.actor.height_pair.student_height_estimator))
+
+    def test_rollout_preserves_equal_teacher_student_mask_and_gru_states(self) -> None:
+        alg, obs = self.build_algorithm()
+        self.fill_rollout(alg, obs)
+
+        expected_mask = torch.tensor([True, True, False, False])
+        self.assertTrue(torch.equal(alg.teacher_mask, expected_mask))
+        self.assertIsNotNone(alg.storage.teacher_masks)
+        for step_mask in alg.storage.teacher_masks:
+            self.assertTrue(torch.equal(step_mask.squeeze(-1), expected_mask))
+        self.assertIsNotNone(alg.storage.saved_hidden_state_a)
+        self.assertEqual(
+            tuple(alg.storage.saved_hidden_state_a[0].shape),
+            (NUM_STEPS, NUM_ENVS, alg.actor.height_pair.student_height_estimator.gru_hidden_dim),
+        )
 
     def clone_named_parameters(self, module: torch.nn.Module) -> dict[str, torch.Tensor]:
         return {name: param.detach().clone() for name, param in module.named_parameters()}

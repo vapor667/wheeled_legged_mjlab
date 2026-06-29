@@ -417,6 +417,7 @@ class OnPolicyRunner:
             verbose=verbose,
             input_names=onnx_model.input_names,  # type: ignore
             output_names=onnx_model.output_names,  # type: ignore
+            external_data=getattr(onnx_model, "use_external_data", True),
         )
 
     def add_git_repo_to_log(self, repo_file_path: str) -> None:

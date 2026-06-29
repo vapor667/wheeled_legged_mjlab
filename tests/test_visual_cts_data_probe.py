@@ -28,6 +28,7 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
 
 DEPTH_PROBE_TASK_ID = "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth"
 VISUAL_CTS_TASK_ID = "Mjlab-Velocity-Rough-WF-Tron1B-VisualCTS"
+VISUAL_CTS_PRIVILEGED_DIM = 46
 
 
 class VisualCTSDataProbeTests(unittest.TestCase):
@@ -91,6 +92,9 @@ class VisualCTSDataProbeTests(unittest.TestCase):
         agent = asdict(load_rl_cfg(VISUAL_CTS_TASK_ID))
 
         self.assertIn(DEPTH_CAMERA_NAME, env_cfg.observations)
+        self.assertIn("height_scan", env_cfg.observations)
+        self.assertIn("privileged", env_cfg.observations)
+        self.assertNotIn("height_scan", env_cfg.observations["privileged"].terms)
         self.assertEqual(agent["actor"]["class_name"], "VisualRepresentationActorCritic")
         self.assertEqual(agent["algorithm"]["class_name"], "RepresentationTeacherStudentPPO")
         self.assertEqual(
@@ -99,12 +103,15 @@ class VisualCTSDataProbeTests(unittest.TestCase):
                 "actor": ("actor",),
                 "critic": ("critic",),
                 "proprio_encoder": ("actor_history",),
-                "privileged_encoder": ("critic",),
+                "privileged_encoder": ("privileged",),
                 "depth_encoder": (DEPTH_CAMERA_NAME,),
+                "height_encoder": ("height_scan",),
             },
         )
-        self.assertEqual(agent["actor"]["height_scan_start"], 49)
+        self.assertIsNone(agent["actor"]["height_scan_start"])
         self.assertEqual(agent["actor"]["height_dim"], math.prod(TERRAIN_SCAN_GRID_SHAPE))
+        self.assertEqual(agent["actor"]["privileged_decoder_hidden_dims"], (128, 256))
+        self.assertEqual(agent["algorithm"]["teacher_student_ratio"], 1.0)
         self.assertIsNotNone(load_runner_cls(VISUAL_CTS_TASK_ID))
 
     @unittest.skipUnless(
@@ -195,12 +202,32 @@ class VisualCTSDataProbeTests(unittest.TestCase):
 
             estimator = policy.height_pair.student_height_estimator
             before = {name: param.detach().clone() for name, param in estimator.named_parameters()}
+            privileged_decoder_before = {
+                name: param.detach().clone() for name, param in policy.privileged_decoder.named_parameters()
+            }
             runner.learn(num_learning_iterations=1)
 
             self.assertTrue(
                 any(not torch.equal(before[name], param) for name, param in estimator.named_parameters())
             )
+            self.assertTrue(
+                any(
+                    not torch.equal(privileged_decoder_before[name], param)
+                    for name, param in policy.privileged_decoder.named_parameters()
+                )
+            )
             obs = wrapped_env.get_observations()
+            self.assertEqual(obs["privileged"].shape[-1], VISUAL_CTS_PRIVILEGED_DIM)
+            self.assertTrue(
+                torch.allclose(
+                    obs["height_scan"],
+                    obs["critic"][
+                        :,
+                        VISUAL_CTS_PRIVILEGED_DIM : VISUAL_CTS_PRIVILEGED_DIM
+                        + math.prod(TERRAIN_SCAN_GRID_SHAPE),
+                    ],
+                )
+            )
             with torch.inference_mode():
                 actions = policy(obs)
             self.assertEqual(actions.shape, (wrapped_env.num_envs, wrapped_env.num_actions))

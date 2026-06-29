@@ -52,6 +52,9 @@ class RolloutStorage:
             self.distribution_params: tuple[torch.Tensor, ...] | None = None
             """Parameters of the action distribution (RL only)."""
 
+            self.teacher_mask: torch.Tensor | None = None
+            """Teacher/student path selected for each environment (concurrent training only)."""
+
             # For distillation
             self.privileged_actions: torch.Tensor | None = None
             """Privileged (teacher) actions (distillation only)."""
@@ -84,6 +87,7 @@ class RolloutStorage:
             masks: torch.Tensor | None = None,
             privileged_actions: torch.Tensor | None = None,
             dones: torch.Tensor | None = None,
+            teacher_mask: torch.Tensor | None = None,
         ) -> None:
             """Initialize a batch container over rollout data."""
             self.observations: TensorDict | None = observations
@@ -107,6 +111,9 @@ class RolloutStorage:
 
             self.old_distribution_params: tuple[torch.Tensor, ...] | None = old_distribution_params
             """Batch of parameters of the old action distribution (RL only)."""
+
+            self.teacher_mask: torch.Tensor | None = teacher_mask
+            """Teacher/student path used to collect each action (concurrent training only)."""
 
             # For distillation
             self.privileged_actions: torch.Tensor | None = privileged_actions
@@ -159,6 +166,7 @@ class RolloutStorage:
             self.distribution_params: tuple[torch.Tensor, ...] | None = None  # Lazily initialized on first transition
             self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.teacher_masks: torch.Tensor | None = None
 
         # For recurrent networks
         self.saved_hidden_state_a = None
@@ -194,6 +202,20 @@ class RolloutStorage:
                 )
             for i, p in enumerate(transition.distribution_params):  # type: ignore
                 self.distribution_params[i][self.step].copy_(p)
+            if transition.teacher_mask is not None:
+                if self.teacher_masks is None:
+                    self.teacher_masks = torch.zeros(
+                        self.num_transitions_per_env,
+                        self.num_envs,
+                        1,
+                        dtype=torch.bool,
+                        device=self.device,
+                    )
+                self.teacher_masks[self.step].copy_(transition.teacher_mask.view(-1, 1))
+            elif self.teacher_masks is not None:
+                raise ValueError(
+                    "teacher_mask must be provided for every transition once concurrent training is enabled"
+                )
 
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
@@ -235,6 +257,9 @@ class RolloutStorage:
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
         old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)  # type: ignore
+        teacher_masks = self.teacher_masks.flatten(0, 1) if self.teacher_masks is not None else None
+        saved_hidden_state_a = self._flatten_saved_hidden_states(self.saved_hidden_state_a)
+        saved_hidden_state_c = self._flatten_saved_hidden_states(self.saved_hidden_state_c)
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -252,6 +277,11 @@ class RolloutStorage:
                     returns=returns[batch_idx],
                     old_actions_log_prob=old_actions_log_prob[batch_idx],
                     old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
+                    hidden_states=(
+                        self._select_hidden_states(saved_hidden_state_a, batch_idx),
+                        self._select_hidden_states(saved_hidden_state_c, batch_idx),
+                    ),
+                    teacher_mask=teacher_masks[batch_idx] if teacher_masks is not None else None,
                 )
 
     # For reinforcement learning with recurrent networks
@@ -261,6 +291,8 @@ class RolloutStorage:
         """Yield trajectory mini-batches with masks and recurrent hidden states."""
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
+        if self.teacher_masks is not None:
+            raise ValueError("Concurrent teacher-student masks are not supported by the recurrent mini-batch generator.")
         padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.observations, self.dones)
         mini_batch_size = self.num_envs // num_mini_batches
 
@@ -352,3 +384,18 @@ class RolloutStorage:
         if hidden_states[1] is not None:
             for i in range(len(hidden_state_c)):
                 self.saved_hidden_state_c[i][self.step].copy_(hidden_state_c[i])  # type: ignore
+
+    @staticmethod
+    def _flatten_saved_hidden_states(saved_hidden_states):
+        if saved_hidden_states is None:
+            return None
+        flattened = tuple(state.flatten(0, 1) for state in saved_hidden_states)
+        return flattened[0] if len(flattened) == 1 else flattened
+
+    @staticmethod
+    def _select_hidden_states(hidden_states: HiddenState, batch_idx: torch.Tensor) -> HiddenState:
+        if hidden_states is None:
+            return None
+        if isinstance(hidden_states, tuple):
+            return tuple(state[batch_idx] for state in hidden_states)
+        return hidden_states[batch_idx]

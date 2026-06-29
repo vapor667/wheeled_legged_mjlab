@@ -106,6 +106,22 @@ class RepresentationActorCritic(nn.Module):
         latent = self.get_privileged_latent(obs)
         return self._actor(actor_obs, latent, stochastic_output=stochastic_output)
 
+    def act_mixed(
+        self,
+        obs: TensorDict,
+        teacher_mask: torch.Tensor,
+        masks: torch.Tensor | None = None,
+        hidden_state: HiddenState = None,
+        stochastic_output: bool = False,
+        update_hidden_state: bool = False,
+    ) -> torch.Tensor:
+        """Run teacher and student environments through one shared action distribution."""
+        del update_hidden_state
+        obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
+        actor_obs = self.get_actor_obs(obs)
+        latent = self.get_mixed_latent(obs, teacher_mask, hidden_state=hidden_state)
+        return self._actor(actor_obs, latent, stochastic_output=stochastic_output)
+
     def evaluate_teacher(
         self,
         obs: TensorDict,
@@ -119,12 +135,31 @@ class RepresentationActorCritic(nn.Module):
         latent = self.get_privileged_latent(obs)
         return self.critic_head(torch.cat((critic_obs, latent), dim=-1))
 
-    def compute_representation_loss(self, obs: TensorDict) -> torch.Tensor:
+    def evaluate_mixed(
+        self,
+        obs: TensorDict,
+        teacher_mask: torch.Tensor,
+        masks: torch.Tensor | None = None,
+        hidden_state: HiddenState = None,
+    ) -> torch.Tensor:
+        """Evaluate the shared critic on the path used for each environment."""
+        obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
+        critic_obs = self.get_critic_obs(obs)
+        latent = self.get_mixed_latent(obs, teacher_mask, hidden_state=hidden_state)
+        return self.critic_head(torch.cat((critic_obs, latent), dim=-1))
+
+    def compute_representation_loss(self, obs: TensorDict, hidden_state: HiddenState = None) -> torch.Tensor:
         """Align proprioceptive latents to detached privileged latents."""
+        del hidden_state
         proprio_latent = self.get_proprio_latent(obs)
         with torch.no_grad():
             privileged_latent = self.get_privileged_latent(obs)
         return F.mse_loss(proprio_latent, privileged_latent)
+
+    def compute_representation_losses(
+        self, obs: TensorDict, hidden_state: HiddenState = None
+    ) -> dict[str, torch.Tensor]:
+        return {"representation_total": self.compute_representation_loss(obs, hidden_state=hidden_state)}
 
     def ppo_parameters(self):
         """Yield parameters optimized by PPO."""
@@ -161,6 +196,25 @@ class RepresentationActorCritic(nn.Module):
     def get_privileged_latent(self, obs: TensorDict) -> torch.Tensor:
         latent = self.privileged_encoder(self.get_privileged_obs(obs))
         return self._normalize_latent(latent)
+
+    def get_student_latent(self, obs: TensorDict, hidden_state: HiddenState = None) -> torch.Tensor:
+        del hidden_state
+        return self.get_proprio_latent(obs)
+
+    def get_teacher_latent(self, obs: TensorDict, hidden_state: HiddenState = None) -> torch.Tensor:
+        del hidden_state
+        return self.get_privileged_latent(obs)
+
+    def get_mixed_latent(
+        self,
+        obs: TensorDict,
+        teacher_mask: torch.Tensor,
+        hidden_state: HiddenState = None,
+    ) -> torch.Tensor:
+        student_latent = self.get_student_latent(obs, hidden_state=hidden_state)
+        teacher_latent = self.get_teacher_latent(obs, hidden_state=hidden_state)
+        teacher_mask = self._validate_teacher_mask(teacher_mask, student_latent.shape[0])
+        return torch.where(teacher_mask, teacher_latent, student_latent.detach())
 
     def reset(self, dones: torch.Tensor | None = None, hidden_state: HiddenState = None) -> None:
         del dones, hidden_state
@@ -219,6 +273,14 @@ class RepresentationActorCritic(nn.Module):
 
     def _normalize_latent(self, latent: torch.Tensor) -> torch.Tensor:
         return F.normalize(latent, p=2.0, dim=-1) if self.normalize_latent else latent
+
+    @staticmethod
+    def _validate_teacher_mask(teacher_mask: torch.Tensor, batch_size: int) -> torch.Tensor:
+        if teacher_mask.ndim == 1:
+            teacher_mask = teacher_mask.unsqueeze(-1)
+        if tuple(teacher_mask.shape) != (batch_size, 1):
+            raise ValueError(f"teacher_mask must have shape [{batch_size}] or [{batch_size}, 1]")
+        return teacher_mask.to(dtype=torch.bool)
 
     def _cat_obs(self, obs: TensorDict, obs_groups: list[str]) -> torch.Tensor:
         return torch.cat([obs[obs_group] for obs_group in obs_groups], dim=-1)

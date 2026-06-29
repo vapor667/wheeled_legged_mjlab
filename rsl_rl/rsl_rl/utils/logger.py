@@ -180,7 +180,8 @@ class Logger:
 
             # Log losses
             for key, value in loss_dict.items():
-                self.writer.add_scalar(f"Loss/{key}", value, it)
+                metric_key = key if "/" in key else f"Loss/{key}"
+                self.writer.add_scalar(metric_key, value, it)
             self.writer.add_scalar("Loss/learning_rate", learning_rate, it)
 
             # Log std

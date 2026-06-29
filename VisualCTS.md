@@ -33,6 +33,8 @@ Vision-CTS 是在原 CTS，也就是 Concurrent Teacher-Student Reinforcement Le
 * teacher 直接使用仿真中的 privileged observation；
 * student 只使用部署可获得的 observation；
 * student estimator 通过监督学习去模仿 teacher latent 或重建 privileged state；
+* PPO 使用 student latent 生成 student group 的动作，但不要求 PPO gradient 更新 student estimator；
+* student estimator 由 latent alignment 和 reconstruction loss 单独优化；
 * 不需要先训练 teacher 再蒸馏 student，而是在一个阶段里同时训练。
 
 这篇论文的改动是：
@@ -559,9 +561,11 @@ fusion_seq: [B, T, fusion_dim]
 gru_input = concat(proprio_feature, depth_feature)  # [B, fusion_dim]
 h_gru = GRUCell(gru_input, h_prev)
 l_t_s_h = Linear(h_gru)
+l_t_s_h = F.normalize(l_t_s_h, p=2, dim=-1)
 ```
 
 部署时维护每个 env 的 GRU hidden state。episode reset 时清零。
+归一化后的 latent 同时用于 heightmap decoder、latent alignment loss 和 actor 输入，不保留另一套 raw latent 数据流。
 
 建议优先实现方式 B。
 
@@ -626,6 +630,15 @@ loss_rec = (
 )
 ```
 
+所有送入 actor 和 latent alignment loss 的 teacher/student latent 都先逐样本做 L2 归一化：
+
+```python
+l_t_e = F.normalize(l_t_e, p=2, dim=-1)
+l_s_e = F.normalize(l_s_e, p=2, dim=-1)
+l_t_h = F.normalize(l_t_h, p=2, dim=-1)
+l_s_h = F.normalize(l_s_h, p=2, dim=-1)
+```
+
 建议 teacher latent 在 supervised loss 中 detach：
 
 ```python
@@ -640,22 +653,32 @@ l_t_h.detach()
 
 但是，teacher encoder 本身仍可接收 PPO gradient，因为 teacher actor path 使用了 teacher latent。
 
-最终总 loss：
+CTS 不要求 student estimator 接收 PPO gradient。student group 的动作仍由 student latent 产生，但 PPO 前向应对该 latent detach：
 
 ```python
-loss_total = loss_ppo + rec_coef * loss_rec
+policy_latent_e = torch.where(is_teacher[:, None], l_t_e, l_s_e.detach())
+policy_latent_h = torch.where(is_teacher[:, None], l_t_h, l_s_h.detach())
 ```
 
-建议：
+推荐使用两个参数互不重叠的优化器：
+
+```python
+ppo_optimizer.zero_grad()
+loss_ppo.backward()
+ppo_optimizer.step()       # shared actor/critics + teacher encoders
+
+student_optimizer.zero_grad()
+(rec_coef * loss_rec).backward()
+student_optimizer.step()   # student estimators + decoder heads
+```
+
+`rec_coef` 可保留为 supervised loss 的缩放项；使用 Adam 和独立 optimizer 时，student learning rate 通常是更直接的调节量。
+
+建议初始配置：
 
 ```yaml
 rec_coef: 1.0
-```
-
-如果 reconstruction loss 过大，调低：
-
-```yaml
-rec_coef: 0.1
+student_learning_rate: 1.0e-3
 ```
 
 ---
@@ -1408,6 +1431,15 @@ compute: Intel NUC
 * GRU hidden state 在机器人启动时清零；
 * fall reset 或 episode reset 时清零。
 
+最小 ONNX 部署接口应显式传递 recurrent state，避免依赖 ONNX 图内部可变状态：
+
+```text
+Inputs:  actor_obs, proprio_history, depth, hidden_state_in
+Outputs: actions, hidden_state_out
+```
+
+viewer 或真实机器人开始新 episode 时，将 `hidden_state_in` 清零；常规控制步把上一帧 `hidden_state_out` 回传。
+
 ---
 
 # 18. 推荐代码结构
@@ -1525,8 +1557,8 @@ class VisualCTSActorCritic(nn.Module):
         )
 
         # Switch module
-        l_e = torch.where(is_teacher[:, None], l_t_e, l_s_e)
-        l_h = torch.where(is_teacher[:, None], l_t_h, l_s_h)
+        l_e = torch.where(is_teacher[:, None], l_t_e, l_s_e.detach())
+        l_h = torch.where(is_teacher[:, None], l_t_h, l_s_h.detach())
         latent = torch.cat([l_e, l_h], dim=-1)
 
         actor_input = torch.cat([o_t, latent], dim=-1)
@@ -1741,17 +1773,21 @@ for iteration in range(num_learning_iterations):
             h_t=batch.h_t,
         )
 
-        loss = (
+        ppo_loss = (
             policy_loss
             + value_coef * value_loss
             - entropy_coef * entropy_loss
-            + rec_coef * rec_loss
         )
 
-        optimizer.zero_grad()
-        loss.backward()
-        clip_grad_norm_(model.parameters(), max_grad_norm)
-        optimizer.step()
+        ppo_optimizer.zero_grad()
+        ppo_loss.backward()
+        clip_grad_norm_(ppo_parameters, max_grad_norm)
+        ppo_optimizer.step()
+
+        student_optimizer.zero_grad()
+        (rec_coef * rec_loss).backward()
+        clip_grad_norm_(student_estimator_parameters, max_grad_norm)
+        student_optimizer.step()
 ```
 
 ---
@@ -2084,6 +2120,7 @@ adv_total = adv_stable + adv_loco
 6. losses:
 
    * PPO clipped policy loss
+   * PPO 使用 detached student latent，不更新 student estimators
    * stable critic value loss
    * locomotion critic value loss
    * entropy loss
