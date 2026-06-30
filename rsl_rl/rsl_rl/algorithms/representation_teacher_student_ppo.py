@@ -372,6 +372,13 @@ class RepresentationTeacherStudentPPO:
             raise ValueError("Concurrent teacher-student training requires at least two environments")
         teacher_fraction = teacher_student_ratio / (teacher_student_ratio + 1.0)
         num_teacher_envs = min(max(int(num_envs * teacher_fraction), 1), num_envs - 1)
-        teacher_mask = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
-        teacher_mask[:num_teacher_envs] = True
-        return teacher_mask
+
+        # Terrain types are commonly assigned to contiguous ranges of environment IDs.
+        # Spread both groups uniformly across those ranges instead of putting every
+        # teacher in one contiguous prefix, which can separate teacher and student
+        # rollouts by terrain type. The cumulative quota produces exactly
+        # ``num_teacher_envs`` entries for arbitrary teacher/student ratios.
+        env_ids = torch.arange(num_envs, device=self.device, dtype=torch.int64)
+        quota_before = torch.div(env_ids * num_teacher_envs, num_envs, rounding_mode="floor")
+        quota_after = torch.div((env_ids + 1) * num_teacher_envs, num_envs, rounding_mode="floor")
+        return quota_after > quota_before

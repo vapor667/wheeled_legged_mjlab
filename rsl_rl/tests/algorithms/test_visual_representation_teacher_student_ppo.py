@@ -135,7 +135,7 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
         alg, obs = self.build_algorithm()
         self.fill_rollout(alg, obs)
 
-        expected_mask = torch.tensor([True, True, False, False])
+        expected_mask = torch.tensor([False, True, False, True])
         self.assertTrue(torch.equal(alg.teacher_mask, expected_mask))
         self.assertIsNotNone(alg.storage.teacher_masks)
         for step_mask in alg.storage.teacher_masks:
@@ -145,6 +145,31 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
             tuple(alg.storage.saved_hidden_state_a[0].shape),
             (NUM_STEPS, NUM_ENVS, alg.actor.height_pair.student_height_estimator.gru_hidden_dim),
         )
+
+    def test_teacher_student_mask_balances_contiguous_terrain_type_ranges(self) -> None:
+        alg, _ = self.build_algorithm()
+        mask = alg._make_teacher_mask(2048, teacher_student_ratio=1.0)
+
+        self.assertIsNotNone(mask)
+        self.assertEqual(int(mask.sum()), 1024)
+        terrain_type_counts = (342, 341, 341, 171, 171, 682)
+        start = 0
+        for count in terrain_type_counts:
+            terrain_mask = mask[start : start + count]
+            num_teachers = int(terrain_mask.sum())
+            num_students = count - num_teachers
+            self.assertLessEqual(abs(num_teachers - num_students), 1)
+            self.assertGreater(num_teachers, 0)
+            self.assertGreater(num_students, 0)
+            start += count
+        self.assertEqual(start, mask.numel())
+
+    def test_teacher_student_mask_preserves_arbitrary_ratio_count(self) -> None:
+        alg, _ = self.build_algorithm()
+        for ratio in (0.25, 0.5, 1.0, 2.0, 4.0):
+            mask = alg._make_teacher_mask(101, teacher_student_ratio=ratio)
+            expected = min(max(int(101 * ratio / (ratio + 1.0)), 1), 100)
+            self.assertEqual(int(mask.sum()), expected)
 
     def clone_named_parameters(self, module: torch.nn.Module) -> dict[str, torch.Tensor]:
         return {name: param.detach().clone() for name, param in module.named_parameters()}
