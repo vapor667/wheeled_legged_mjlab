@@ -17,8 +17,7 @@ import wheeled_legged_mjlab  # noqa: F401
 from rsl_rl.models import VisualRepresentationActorCritic
 from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
-    DEPTH_BUFFER_SIZE,
-    DEPTH_BUFFER_UPDATE_PERIOD,
+    DEPTH_CAPTURE_FREQUENCY_HZ,
     DEPTH_CAMERA_HEIGHT,
     DEPTH_CAMERA_NAME,
     DEPTH_CAMERA_WIDTH,
@@ -40,13 +39,12 @@ class VisualCTSDataProbeTests(unittest.TestCase):
 
         depth_group = env_cfg.observations[DEPTH_CAMERA_NAME]
         depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
-        self.assertIs(depth_term.func, mdp.depth_buffer)
+        self.assertIs(depth_term.func, mdp.async_depth_buffer)
         self.assertEqual(
             depth_term.params,
             {
                 "sensor_name": DEPTH_CAMERA_NAME,
-                "buffer_size": DEPTH_BUFFER_SIZE,
-                "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
+                "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
             },
         )
         self.assertFalse(depth_group.enable_corruption)
@@ -63,12 +61,13 @@ class VisualCTSDataProbeTests(unittest.TestCase):
         self.assertIn("height_scan", critic_terms)
 
         expected_depth_buffer_shape = (
-            DEPTH_BUFFER_SIZE,
+            1,
             DEPTH_CAMERA_HEIGHT,
             DEPTH_CAMERA_WIDTH,
         )
         expected_height_scan_dim = math.prod(TERRAIN_SCAN_GRID_SHAPE)
-        self.assertEqual(expected_depth_buffer_shape, (5, 32, 24))
+        self.assertEqual(expected_depth_buffer_shape, (1, 32, 24))
+        self.assertEqual(DEPTH_CAPTURE_FREQUENCY_HZ, 25.0)
         self.assertEqual(expected_height_scan_dim, 121)
 
         training_obs_groups = {
@@ -110,6 +109,9 @@ class VisualCTSDataProbeTests(unittest.TestCase):
         )
         self.assertIsNone(agent["actor"]["height_scan_start"])
         self.assertEqual(agent["actor"]["height_dim"], math.prod(TERRAIN_SCAN_GRID_SHAPE))
+        self.assertEqual(agent["actor"]["encoder_hidden_dims"], (512, 256, 128))
+        self.assertEqual(agent["actor"]["height_teacher_hidden_dims"], (512, 256))
+        self.assertEqual(agent["actor"]["height_proprio_hidden_dims"], (512, 256))
         self.assertEqual(agent["actor"]["privileged_decoder_hidden_dims"], (128, 256))
         self.assertEqual(agent["algorithm"]["teacher_student_ratio"], 1.0)
         self.assertIsNotNone(load_runner_cls(VISUAL_CTS_TASK_ID))
@@ -154,13 +156,11 @@ class VisualCTSDataProbeTests(unittest.TestCase):
             self.assertEqual(critic_shape[0], actor_shape[0])
             self.assertEqual(depth_shape[0], actor_shape[0])
 
-            expected_depth_elements = (
-                DEPTH_BUFFER_SIZE * DEPTH_CAMERA_HEIGHT * DEPTH_CAMERA_WIDTH
-            )
+            expected_depth_elements = DEPTH_CAMERA_HEIGHT * DEPTH_CAMERA_WIDTH
             if len(depth_shape) == 4:
                 self.assertEqual(
                     depth_shape[1:],
-                    (DEPTH_BUFFER_SIZE, DEPTH_CAMERA_HEIGHT, DEPTH_CAMERA_WIDTH),
+                    (1, DEPTH_CAMERA_HEIGHT, DEPTH_CAMERA_WIDTH),
                 )
             else:
                 self.assertEqual(depth_shape[1], expected_depth_elements)

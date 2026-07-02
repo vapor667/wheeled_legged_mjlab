@@ -77,8 +77,7 @@ DEPTH_CAMERA_NAME = "depth_camera"
 DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/d435"
 DEPTH_CAMERA_WIDTH = 24
 DEPTH_CAMERA_HEIGHT = 32
-DEPTH_BUFFER_SIZE = 5
-DEPTH_BUFFER_UPDATE_PERIOD = 5
+DEPTH_CAPTURE_FREQUENCY_HZ = 25.0
 ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
 ROUGHNESS_GATE_THRESHOLD_FINAL = 0.6
 ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 8_000 * 24
@@ -310,11 +309,10 @@ def make_observations(
         observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
             terms={
                 DEPTH_CAMERA_NAME: ObservationTermCfg(
-                    func=mdp.depth_buffer,
+                    func=mdp.async_depth_buffer,
                     params={
                         "sensor_name": DEPTH_CAMERA_NAME,
-                        "buffer_size": DEPTH_BUFFER_SIZE,
-                        "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
+                        "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
                     },
                 )
             },

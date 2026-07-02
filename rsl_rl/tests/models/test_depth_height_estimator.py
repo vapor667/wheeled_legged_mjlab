@@ -16,7 +16,7 @@ from rsl_rl.models import DepthHeightEstimator
 
 BATCH_SIZE = 4
 PROPRIO_HISTORY_DIM = 165
-DEPTH_SHAPE = (5, 32, 24)
+DEPTH_SHAPE = (1, 32, 24)
 HEIGHT_DIM = 121
 HEIGHT_LATENT_DIM = 16
 GRU_HIDDEN_DIM = 32

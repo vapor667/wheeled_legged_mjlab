@@ -31,11 +31,11 @@ class RslRlVisualRepresentationModelCfg(RslRlRepresentationModelCfg):
     height_latent_dim: int = 32
     height_scan_start: int | None = None
     height_dim: int = 121
-    height_teacher_hidden_dims: Tuple[int, ...] = (256, 128)
+    height_teacher_hidden_dims: Tuple[int, ...] = (512, 256)
     height_proprio_feature_dim: int = 64
     height_depth_feature_dim: int = 64
     height_gru_hidden_dim: int = 128
-    height_proprio_hidden_dims: Tuple[int, ...] = (256, 128)
+    height_proprio_hidden_dims: Tuple[int, ...] = (512, 256)
     height_depth_channels: Tuple[int, ...] = (16, 32, 32)
     height_decoder_hidden_dims: Tuple[int, ...] = (128, 256)
     privileged_decoder_hidden_dims: Tuple[int, ...] = (128, 256)
@@ -153,11 +153,11 @@ def wf_tron1b_visual_cts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             height_latent_dim=32,
             height_scan_start=None,
             height_dim=121,
-            height_teacher_hidden_dims=(256, 128),
+            height_teacher_hidden_dims=(512, 256),
             height_proprio_feature_dim=64,
             height_depth_feature_dim=64,
             height_gru_hidden_dim=128,
-            height_proprio_hidden_dims=(256, 128),
+            height_proprio_hidden_dims=(512, 256),
             height_depth_channels=(16, 32, 32),
             height_decoder_hidden_dims=(128, 256),
             privileged_decoder_hidden_dims=(128, 256),

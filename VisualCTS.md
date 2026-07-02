@@ -185,6 +185,8 @@ depth: Tensor  # [B, 1, 80, 60] or [B, 1, 60, 80]
 
 具体宽高顺序要在工程中统一。论文只写 `80 x 60`，没有说明 PyTorch tensor layout。
 
+当前 WF-TRON1B/mjlab 实现使用单通道 `[B, 1, 32, 24]` 深度图，并以 25 Hz 独立采样时钟维护 latest-frame buffer；50 Hz policy 在没有新深度帧时复用上一帧。这是当前任务的 implementation choice，论文值仍为 `80 x 60`、30 Hz asynchronous。
+
 ---
 
 # 3. Action space 和低层 PD 控制
@@ -313,12 +315,12 @@ e_t: [B, privileged_dim]
 l_t_t_e: [B, priv_latent_dim]
 ```
 
-论文只说是 encoder，没有给出具体结构。建议默认：
+Visual-CTS 只说明存在 encoder，没有给出具体结构。CTS 前作给出的 encoder 为 `[512, 256]`；当前 privileged teacher/student 代码已经使用 `[512, 256, 128]`，因此按现有实现保留：
 
 ```python
 PrivilegedEncoder = MLP(
     input_dim=privileged_dim,
-    hidden_dims=[256, 128],
+    hidden_dims=[512, 256, 128],
     output_dim=priv_latent_dim,
     activation=ELU
 )
@@ -328,7 +330,7 @@ PrivilegedEncoder = MLP(
 
 ```yaml
 priv_latent_dim: 32
-priv_encoder_hidden_dims: [256, 128]
+priv_encoder_hidden_dims: [512, 256, 128]
 ```
 
 ---
@@ -347,12 +349,12 @@ h_t: [B, 441]
 l_t_t_h: [B, height_latent_dim]
 ```
 
-论文只说 heightmap encoder，没有给出结构。可以实现为 MLP：
+论文只说 heightmap encoder，没有给出结构。当前实现按 CTS encoder 规格采用 MLP：
 
 ```python
 HeightmapEncoder = MLP(
     input_dim=441,
-    hidden_dims=[256, 128],
+    hidden_dims=[512, 256],
     output_dim=height_latent_dim,
     activation=ELU
 )
@@ -364,7 +366,7 @@ HeightmapEncoder = MLP(
 
 ```yaml
 height_latent_dim: 32
-height_encoder_hidden_dims: [256, 128]
+height_encoder_hidden_dims: [512, 256]
 ```
 
 ---
@@ -446,7 +448,7 @@ e_hat_t: [B, privileged_dim]
 ```python
 PrivilegedEstimatorEncoder = MLP(
     input_dim=history_len * proprio_dim,
-    hidden_dims=[256, 128],
+    hidden_dims=[512, 256, 128],
     output_dim=priv_latent_dim,
     activation=ELU
 )
@@ -492,7 +494,7 @@ proprio_feature = proprio_mlp(o_hist_flat)
 ```python
 ProprioHistoryEncoder = MLP(
     input_dim=history_len * proprio_dim,
-    hidden_dims=[256, 128],
+    hidden_dims=[512, 256],
     output_dim=proprio_feature_dim,
     activation=ELU
 )
@@ -1422,6 +1424,8 @@ camera: Intel RealSense D435i
 compute: Intel NUC
 ```
 
+当前 mjlab 实现采用 25 Hz depth capture：depth producer 使用独立采样时钟更新单张 latest frame，50 Hz policy consumer 在两次 capture 之间复用上一帧。选择 25 Hz 是为了在 50 Hz policy 上获得确定的每两步一次采样；这是对论文30 Hz异步处理的工程近似。
+
 工程建议：
 
 * policy thread 50 Hz；
@@ -1803,9 +1807,13 @@ visual_cts:
   num_actions: 6
 
   depth:
-    width: 80
-    height: 60
+    width: 24
+    height: 32
     channels: 1
+    capture_frequency_hz: 25.0
+    asynchronous_sample_and_hold: true
+    paper_resolution: [80, 60]
+    paper_frequency_hz: 30.0
     normalize: true
     clip_min: 0.0
     clip_max: 5.0
@@ -1823,13 +1831,14 @@ visual_cts:
   model:
     activation: elu
 
-    priv_encoder_hidden_dims: [256, 128]
-    height_encoder_hidden_dims: [256, 128]
+    priv_encoder_hidden_dims: [512, 256, 128]
+    height_encoder_hidden_dims: [512, 256]
 
-    priv_estimator_encoder_hidden_dims: [256, 128]
+    priv_estimator_encoder_hidden_dims: [512, 256, 128]
     priv_estimator_decoder_hidden_dims: [128, 256]
 
     proprio_feature_dim: 64
+    height_proprio_hidden_dims: [512, 256]
     depth_feature_dim: 64
     gru_hidden_dim: 128
 
