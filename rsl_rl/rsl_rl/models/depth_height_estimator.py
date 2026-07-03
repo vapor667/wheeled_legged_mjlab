@@ -26,7 +26,7 @@ class DepthHeightEstimator(nn.Module):
         gru_hidden_dim: int = 128,
         proprio_hidden_dims: tuple[int, ...] | list[int] = (512, 256),
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
-        decoder_hidden_dims: tuple[int, ...] | list[int] = (128, 256),
+        decoder_hidden_dims: tuple[int, ...] | list[int] = (256, 512),
         activation: str = "elu",
         normalize_latent: bool = True,
     ) -> None:

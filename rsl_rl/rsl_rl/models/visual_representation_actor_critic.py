@@ -43,8 +43,8 @@ class VisualRepresentationActorCritic(nn.Module):
         height_gru_hidden_dim: int = 128,
         height_proprio_hidden_dims: tuple[int, ...] | list[int] = (512, 256),
         height_depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
-        height_decoder_hidden_dims: tuple[int, ...] | list[int] = (128, 256),
-        privileged_decoder_hidden_dims: tuple[int, ...] | list[int] = (128, 256),
+        height_decoder_hidden_dims: tuple[int, ...] | list[int] = (256, 512),
+        privileged_decoder_hidden_dims: tuple[int, ...] | list[int] = (256, 512),
     ) -> None:
         super().__init__()
         self.actor_obs_groups, self.actor_obs_dim = self._get_obs_dim(obs, obs_groups, "actor")

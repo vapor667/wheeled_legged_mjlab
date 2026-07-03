@@ -37,8 +37,8 @@ class RslRlVisualRepresentationModelCfg(RslRlRepresentationModelCfg):
     height_gru_hidden_dim: int = 128
     height_proprio_hidden_dims: Tuple[int, ...] = (512, 256)
     height_depth_channels: Tuple[int, ...] = (16, 32, 32)
-    height_decoder_hidden_dims: Tuple[int, ...] = (128, 256)
-    privileged_decoder_hidden_dims: Tuple[int, ...] = (128, 256)
+    height_decoder_hidden_dims: Tuple[int, ...] = (256, 512)
+    privileged_decoder_hidden_dims: Tuple[int, ...] = (256, 512)
     class_name: str = "VisualRepresentationActorCritic"
 
 
@@ -159,8 +159,8 @@ def wf_tron1b_visual_cts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             height_gru_hidden_dim=128,
             height_proprio_hidden_dims=(512, 256),
             height_depth_channels=(16, 32, 32),
-            height_decoder_hidden_dims=(128, 256),
-            privileged_decoder_hidden_dims=(128, 256),
+            height_decoder_hidden_dims=(256, 512),
+            privileged_decoder_hidden_dims=(256, 512),
             distribution_cfg={
                 "class_name": "GaussianDistribution",
                 "init_std": 1.0,

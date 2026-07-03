@@ -695,7 +695,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_contact_pattern": RewardTermCfg(
                     func=mdp.rough_contact_pattern,
-                    weight=0.25,
+                    weight=0.5,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
