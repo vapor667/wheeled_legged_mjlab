@@ -53,6 +53,7 @@ cover/
 tests/
 !tests/
 tests/*
+!tests/test_action_delay.py
 !tests/test_representation_teacher_student_config.py
 !tests/test_visual_cts_data_probe.py
 !rsl_rl/tests/
