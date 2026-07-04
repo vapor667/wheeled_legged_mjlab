@@ -218,7 +218,7 @@ def make_observations(
             params={
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
-                    joint_names=ALL_JOINT_NAMES,
+                    joint_names=LEG_JOINT_NAMES,
                 )
             },
             noise=Unoise(n_min=-0.01, n_max=0.01),
@@ -623,7 +623,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
-        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
+        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.2),
         "self_collisions": RewardTermCfg(
             func=mdp.self_collision_cost,
             weight=-0.1,
