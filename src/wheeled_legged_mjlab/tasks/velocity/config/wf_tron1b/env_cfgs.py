@@ -84,7 +84,10 @@ DEPTH_CAMERA_HEIGHT = 32
 DEPTH_CAPTURE_FREQUENCY_HZ = 25.0
 ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
 ROUGHNESS_GATE_THRESHOLD_FINAL = 0.6
-ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 8_000 * 24
+ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
+FELL_OVER_LIMIT_ANGLE_INITIAL = math.radians(65.0)
+FELL_OVER_LIMIT_ANGLE_FINAL = math.radians(85.0)
+FELL_OVER_LIMIT_ANGLE_RAMP_STEPS = 5_000 * 24
 
 
 def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
@@ -206,7 +209,7 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
 def make_observations(
     *, rough: bool, depth: bool = False, separate_height_scan: bool = False
 ) -> dict[str, ObservationGroupCfg]:
-    """Actor uses deployable proprioception; critic keeps privileged state."""
+    """Student history uses noisy proprioception; teacher and critic stay clean."""
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
             func=mdp.builtin_sensor,
@@ -340,9 +343,9 @@ def make_observations(
         "actor_history": ObservationGroupCfg(
             terms=dict(actor_terms),
             concatenate_terms=True,
-            enable_corruption=False,
+            enable_corruption=True,
             history_length=5,
-            flatten_history_dim=True,
+            flatten_history_dim=False,
         ),
         "critic": ObservationGroupCfg(
             terms=critic_terms,
@@ -815,7 +818,7 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
         "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
         "fell_over": TerminationTermCfg(
             func=mdp.bad_orientation,
-            params={"limit_angle": math.radians(70.0)},
+            params={"limit_angle": FELL_OVER_LIMIT_ANGLE_INITIAL},
         ),
         "illegal_contact": TerminationTermCfg(
             func=mdp.illegal_contact,
@@ -832,8 +835,18 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
 
 
 def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
-    """Terrain curriculum for rough training."""
-    curriculum = {}
+    """Training curricula for recovery tolerance and rough terrain."""
+    curriculum = {
+        "fell_over_limit_angle": CurriculumTermCfg(
+            func=mdp.fell_over_limit_angle,
+            params={
+                "termination_term_name": "fell_over",
+                "initial_limit_angle": FELL_OVER_LIMIT_ANGLE_INITIAL,
+                "final_limit_angle": FELL_OVER_LIMIT_ANGLE_FINAL,
+                "ramp_steps": FELL_OVER_LIMIT_ANGLE_RAMP_STEPS,
+            },
+        )
+    }
     if rough:
         curriculum["terrain_levels"] = CurriculumTermCfg(
             func=mdp.terrain_levels_vel,
@@ -908,6 +921,9 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     cfg.observations["actor_history"].enable_corruption = False
     cfg.events.pop("push_robot", None)
     cfg.curriculum = {}
+    cfg.terminations["fell_over"].params["limit_angle"] = (
+        FELL_OVER_LIMIT_ANGLE_FINAL
+    )
 
     twist_cmd = cfg.commands[COMMAND_NAME]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
