@@ -185,9 +185,9 @@ def wf_tron1b_visual_cts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             teacher_student_ratio=1.0,
         ),
         obs_groups={
-            "actor": ("actor",),
+            "teacher_actor": ("actor",),
             "critic": ("critic",),
-            "proprio_encoder": ("actor_history",),
+            "student_history": ("actor_history",),
             "privileged_encoder": ("privileged",),
             "depth_encoder": ("depth_camera",),
             "height_encoder": ("height_scan",),

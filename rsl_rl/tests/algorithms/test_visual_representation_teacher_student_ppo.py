@@ -20,7 +20,7 @@ from rsl_rl.storage import RolloutStorage
 NUM_ENVS = 4
 NUM_STEPS = 4
 ACTOR_DIM = 6
-ACTOR_HISTORY_DIM = 30
+HISTORY_LENGTH = 5
 CRITIC_DIM = 16
 DEPTH_SHAPE = (1, 32, 24)
 HEIGHT_SCAN_START = 4
@@ -33,7 +33,7 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
         return TensorDict(
             {
                 "actor": torch.randn(NUM_ENVS, ACTOR_DIM),
-                "actor_history": torch.randn(NUM_ENVS, ACTOR_HISTORY_DIM),
+                "actor_history": torch.randn(NUM_ENVS, HISTORY_LENGTH, ACTOR_DIM),
                 "critic": torch.randn(NUM_ENVS, CRITIC_DIM),
                 "depth_camera": torch.randn(NUM_ENVS, *DEPTH_SHAPE),
                 "height_scan": torch.randn(NUM_ENVS, HEIGHT_DIM),
@@ -45,9 +45,9 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
         return VisualRepresentationActorCritic(
             obs,
             {
-                "actor": ["actor"],
+                "teacher_actor": ["actor"],
                 "critic": ["critic"],
-                "proprio_encoder": ["actor_history"],
+                "student_history": ["actor_history"],
                 "privileged_encoder": ["critic"],
                 "depth_encoder": ["depth_camera"],
                 "height_encoder": ["height_scan"],

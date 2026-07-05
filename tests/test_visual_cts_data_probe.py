@@ -27,7 +27,7 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
 
 DEPTH_PROBE_TASK_ID = "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth"
 VISUAL_CTS_TASK_ID = "Mjlab-Velocity-Rough-WF-Tron1B-VisualCTS"
-VISUAL_CTS_PRIVILEGED_DIM = 46
+VISUAL_CTS_PRIVILEGED_DIM = 42
 
 
 class VisualCTSDataProbeTests(unittest.TestCase):
@@ -51,7 +51,10 @@ class VisualCTSDataProbeTests(unittest.TestCase):
 
         actor_history_cfg = env_cfg.observations["actor_history"]
         self.assertEqual(actor_history_cfg.history_length, 5)
-        self.assertTrue(actor_history_cfg.flatten_history_dim)
+        self.assertFalse(actor_history_cfg.flatten_history_dim)
+        self.assertTrue(actor_history_cfg.enable_corruption)
+        self.assertFalse(env_cfg.observations["actor"].enable_corruption)
+        self.assertFalse(env_cfg.observations["critic"].enable_corruption)
 
         actor_terms = env_cfg.observations["actor"].terms
         actor_history_terms = actor_history_cfg.terms
@@ -77,9 +80,9 @@ class VisualCTSDataProbeTests(unittest.TestCase):
         self.assertEqual(
             agent["obs_groups"],
             {
-                "actor": ("actor",),
+                "teacher_actor": ("actor",),
                 "critic": ("critic",),
-                "proprio_encoder": ("actor_history",),
+                "student_history": ("actor_history",),
                 "privileged_encoder": ("critic",),
             },
         )
@@ -99,9 +102,9 @@ class VisualCTSDataProbeTests(unittest.TestCase):
         self.assertEqual(
             agent["obs_groups"],
             {
-                "actor": ("actor",),
+                "teacher_actor": ("actor",),
                 "critic": ("critic",),
-                "proprio_encoder": ("actor_history",),
+                "student_history": ("actor_history",),
                 "privileged_encoder": ("privileged",),
                 "depth_encoder": (DEPTH_CAMERA_NAME,),
                 "height_encoder": ("height_scan",),
@@ -112,7 +115,7 @@ class VisualCTSDataProbeTests(unittest.TestCase):
         self.assertEqual(agent["actor"]["encoder_hidden_dims"], (512, 256, 128))
         self.assertEqual(agent["actor"]["height_teacher_hidden_dims"], (512, 256))
         self.assertEqual(agent["actor"]["height_proprio_hidden_dims"], (512, 256))
-        self.assertEqual(agent["actor"]["privileged_decoder_hidden_dims"], (128, 256))
+        self.assertEqual(agent["actor"]["privileged_decoder_hidden_dims"], (256, 512))
         self.assertEqual(agent["algorithm"]["teacher_student_ratio"], 1.0)
         self.assertIsNotNone(load_runner_cls(VISUAL_CTS_TASK_ID))
 
@@ -149,10 +152,8 @@ class VisualCTSDataProbeTests(unittest.TestCase):
             print("depth_camera_shape", depth_shape)
 
             self.assertEqual(actor_history_shape[0], actor_shape[0])
-            self.assertEqual(
-                actor_history_shape[1],
-                actor_shape[1] * env_cfg.observations["actor_history"].history_length,
-            )
+            self.assertEqual(actor_history_shape[1], env_cfg.observations["actor_history"].history_length)
+            self.assertEqual(actor_history_shape[2], actor_shape[1])
             self.assertEqual(critic_shape[0], actor_shape[0])
             self.assertEqual(depth_shape[0], actor_shape[0])
 

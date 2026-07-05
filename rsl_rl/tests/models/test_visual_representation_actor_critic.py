@@ -19,7 +19,7 @@ from rsl_rl.models import VisualRepresentationActorCritic
 
 BATCH_SIZE = 4
 ACTOR_DIM = 33
-ACTOR_HISTORY_DIM = 165
+HISTORY_LENGTH = 5
 CRITIC_DIM = 170
 DEPTH_SHAPE = (1, 32, 24)
 HEIGHT_SCAN_START = 49
@@ -33,7 +33,7 @@ class VisualRepresentationActorCriticTests(unittest.TestCase):
     def make_obs(self, *, include_critic: bool = True, include_depth: bool = True) -> TensorDict:
         data = {
             "actor": torch.randn(BATCH_SIZE, ACTOR_DIM),
-            "actor_history": torch.randn(BATCH_SIZE, ACTOR_HISTORY_DIM),
+            "actor_history": torch.randn(BATCH_SIZE, HISTORY_LENGTH, ACTOR_DIM),
             "height_scan": torch.randn(BATCH_SIZE, HEIGHT_DIM),
         }
         if include_critic:
@@ -47,9 +47,9 @@ class VisualRepresentationActorCriticTests(unittest.TestCase):
         return VisualRepresentationActorCritic(
             obs,
             {
-                "actor": ["actor"],
+                "teacher_actor": ["actor"],
                 "critic": ["critic"],
-                "proprio_encoder": ["actor_history"],
+                "student_history": ["actor_history"],
                 "privileged_encoder": ["critic"],
                 "depth_encoder": ["depth_camera"],
                 "height_encoder": ["height_scan"],
@@ -145,6 +145,29 @@ class VisualRepresentationActorCriticTests(unittest.TestCase):
         model = self.make_model()
 
         self.assertEqual(model.actor_head[0].in_features, ACTOR_DIM + LATENT_DIM + HEIGHT_LATENT_DIM)
+
+    def test_student_actor_uses_latest_noisy_history_frame(self) -> None:
+        model = self.make_model()
+        obs = self.make_obs()
+
+        self.assertTrue(
+            torch.equal(
+                model.get_student_actor_obs(obs),
+                obs["actor_history"][:, -1, :],
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                model.get_teacher_actor_obs(obs),
+                obs["actor"],
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                model.get_proprio_obs(obs),
+                obs["actor_history"].flatten(start_dim=1),
+            )
+        )
 
     def test_student_inference_does_not_require_critic_observations(self) -> None:
         model = self.make_model()
@@ -245,7 +268,6 @@ class VisualRepresentationActorCriticTests(unittest.TestCase):
         with torch.inference_mode():
             expected_actions = model(obs, hidden_state=hidden_state)
             actions, hidden_state_out = onnx_model(
-                obs["actor"],
                 obs["actor_history"],
                 obs["depth_camera"],
                 hidden_state,
@@ -253,7 +275,7 @@ class VisualRepresentationActorCriticTests(unittest.TestCase):
 
         self.assertTrue(torch.allclose(actions, expected_actions, atol=1e-6))
         self.assertEqual(hidden_state_out.shape, hidden_state.shape)
-        self.assertEqual(onnx_model.input_names, ["actor_obs", "proprio_history", "depth", "hidden_state_in"])
+        self.assertEqual(onnx_model.input_names, ["student_history", "depth", "hidden_state_in"])
         self.assertEqual(onnx_model.output_names, ["actions", "hidden_state_out"])
         self.assertFalse(hasattr(onnx_model, "privileged_decoder"))
         self.assertFalse(hasattr(onnx_model, "height_decoder"))
