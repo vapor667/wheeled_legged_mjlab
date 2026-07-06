@@ -55,6 +55,9 @@ class RolloutStorage:
             self.teacher_mask: torch.Tensor | None = None
             """Teacher/student path selected for each environment (concurrent training only)."""
 
+            self.student_latent: torch.Tensor | None = None
+            """Student latent computed during rollout collection (concurrent training only)."""
+
             # For distillation
             self.privileged_actions: torch.Tensor | None = None
             """Privileged (teacher) actions (distillation only)."""
@@ -88,6 +91,7 @@ class RolloutStorage:
             privileged_actions: torch.Tensor | None = None,
             dones: torch.Tensor | None = None,
             teacher_mask: torch.Tensor | None = None,
+            student_latents: torch.Tensor | None = None,
         ) -> None:
             """Initialize a batch container over rollout data."""
             self.observations: TensorDict | None = observations
@@ -114,6 +118,9 @@ class RolloutStorage:
 
             self.teacher_mask: torch.Tensor | None = teacher_mask
             """Teacher/student path used to collect each action (concurrent training only)."""
+
+            self.student_latents: torch.Tensor | None = student_latents
+            """Fixed rollout student latents used by PPO (concurrent training only)."""
 
             # For distillation
             self.privileged_actions: torch.Tensor | None = privileged_actions
@@ -167,6 +174,7 @@ class RolloutStorage:
             self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.teacher_masks: torch.Tensor | None = None
+            self.student_latents: torch.Tensor | None = None
 
         # For recurrent networks
         self.saved_hidden_state_a = None
@@ -216,6 +224,19 @@ class RolloutStorage:
                 raise ValueError(
                     "teacher_mask must be provided for every transition once concurrent training is enabled"
                 )
+            if transition.student_latent is not None:
+                if self.student_latents is None:
+                    self.student_latents = torch.zeros(
+                        self.num_transitions_per_env,
+                        *transition.student_latent.shape,
+                        device=self.device,
+                        dtype=transition.student_latent.dtype,
+                    )
+                self.student_latents[self.step].copy_(transition.student_latent)
+            elif self.student_latents is not None:
+                raise ValueError(
+                    "student_latent must be provided for every transition once concurrent training is enabled"
+                )
 
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
@@ -245,10 +266,6 @@ class RolloutStorage:
         """Yield shuffled flat mini-batches for feedforward RL updates."""
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
-        batch_size = self.num_envs * self.num_transitions_per_env
-        mini_batch_size = batch_size // num_mini_batches
-        indices = torch.randperm(num_mini_batches * mini_batch_size, requires_grad=False, device=self.device)
-
         # Flatten the data
         observations = self.observations.flatten(0, 1)
         actions = self.actions.flatten(0, 1)
@@ -258,16 +275,12 @@ class RolloutStorage:
         advantages = self.advantages.flatten(0, 1)
         old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)  # type: ignore
         teacher_masks = self.teacher_masks.flatten(0, 1) if self.teacher_masks is not None else None
+        student_latents = self.student_latents.flatten(0, 1) if self.student_latents is not None else None
         saved_hidden_state_a = self._flatten_saved_hidden_states(self.saved_hidden_state_a)
         saved_hidden_state_c = self._flatten_saved_hidden_states(self.saved_hidden_state_c)
 
-        for epoch in range(num_epochs):
-            for i in range(num_mini_batches):
-                # Select the indices for the mini-batch
-                start = i * mini_batch_size
-                stop = (i + 1) * mini_batch_size
-                batch_idx = indices[start:stop]
-
+        for _ in range(num_epochs):
+            for batch_idx in self._flat_mini_batch_indices(num_mini_batches, teacher_masks):
                 # Yield the mini-batch
                 yield RolloutStorage.Batch(
                     observations=observations[batch_idx],  # type: ignore
@@ -282,6 +295,83 @@ class RolloutStorage:
                         self._select_hidden_states(saved_hidden_state_c, batch_idx),
                     ),
                     teacher_mask=teacher_masks[batch_idx] if teacher_masks is not None else None,
+                    student_latents=student_latents[batch_idx] if student_latents is not None else None,
+                )
+
+    def representation_chunk_generator(
+        self,
+        num_mini_batches: int,
+        num_epochs: int,
+        chunk_length: int,
+        student_only: bool = True,
+    ) -> Generator[Batch, None, None]:
+        """Yield continuous trajectory chunks for representation learning."""
+        if self.training_type != "rl":
+            raise ValueError("This function is only available for reinforcement learning training.")
+        if chunk_length <= 0:
+            raise ValueError(f"chunk_length must be positive, got {chunk_length}")
+
+        chunk_length = min(chunk_length, self.num_transitions_per_env)
+        chunk_starts = torch.arange(
+            0,
+            self.num_transitions_per_env - chunk_length + 1,
+            chunk_length,
+            device=self.device,
+        )
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        if student_only and self.teacher_masks is not None:
+            fixed_mask = self.teacher_masks[0, :, 0]
+            rollout_masks = self.teacher_masks[:, :, 0]
+            if not torch.equal(
+                rollout_masks,
+                fixed_mask.unsqueeze(0).expand_as(rollout_masks),
+            ):
+                raise ValueError("Representation chunks require a fixed teacher/student mask within the rollout")
+            env_ids = env_ids[~fixed_mask]
+        if env_ids.numel() == 0:
+            raise ValueError("Representation learning requires at least one student trajectory")
+
+        chunk_envs = env_ids.repeat_interleave(chunk_starts.numel())
+        chunk_times = chunk_starts.repeat(env_ids.numel())
+        num_chunks = chunk_envs.numel()
+        effective_num_mini_batches = min(num_mini_batches, num_chunks)
+
+        for _ in range(num_epochs):
+            permutation = torch.randperm(num_chunks, device=self.device)
+            for chunk_indices in torch.tensor_split(permutation, effective_num_mini_batches):
+                starts = chunk_times[chunk_indices]
+                envs = chunk_envs[chunk_indices]
+                time_indices = starts.unsqueeze(0) + torch.arange(
+                    chunk_length, device=self.device
+                ).unsqueeze(1)
+                env_indices = envs.unsqueeze(0).expand(chunk_length, -1)
+                observations = TensorDict(
+                    {
+                        key: value[time_indices, env_indices]
+                        for key, value in self.observations.items()
+                    },
+                    batch_size=[chunk_length, chunk_indices.numel()],
+                    device=self.device,
+                )
+                hidden_state_a = self._select_chunk_initial_states(
+                    self.saved_hidden_state_a,
+                    starts,
+                    envs,
+                )
+                hidden_state_c = self._select_chunk_initial_states(
+                    self.saved_hidden_state_c,
+                    starts,
+                    envs,
+                )
+                yield RolloutStorage.Batch(
+                    observations=observations,
+                    dones=self.dones[time_indices, env_indices],
+                    hidden_states=(hidden_state_a, hidden_state_c),
+                    teacher_mask=(
+                        self.teacher_masks[time_indices, env_indices]
+                        if self.teacher_masks is not None
+                        else None
+                    ),
                 )
 
     # For reinforcement learning with recurrent networks
@@ -399,3 +489,47 @@ class RolloutStorage:
         if isinstance(hidden_states, tuple):
             return tuple(state[batch_idx] for state in hidden_states)
         return hidden_states[batch_idx]
+
+    def _flat_mini_batch_indices(
+        self,
+        num_mini_batches: int,
+        teacher_masks: torch.Tensor | None,
+    ) -> Generator[torch.Tensor, None, None]:
+        batch_size = self.num_envs * self.num_transitions_per_env
+        if teacher_masks is None:
+            permutation = torch.randperm(batch_size, device=self.device)
+            yield from torch.tensor_split(permutation, min(num_mini_batches, batch_size))
+            return
+
+        flat_mask = teacher_masks.view(-1)
+        teacher_indices = flat_mask.nonzero(as_tuple=False).flatten()
+        student_indices = (~flat_mask).nonzero(as_tuple=False).flatten()
+        if teacher_indices.numel() == 0 or student_indices.numel() == 0:
+            raise ValueError("Concurrent PPO mini-batches require both teacher and student samples")
+        effective_num_mini_batches = min(
+            num_mini_batches,
+            teacher_indices.numel(),
+            student_indices.numel(),
+        )
+        teacher_splits = torch.tensor_split(
+            teacher_indices[torch.randperm(teacher_indices.numel(), device=self.device)],
+            effective_num_mini_batches,
+        )
+        student_splits = torch.tensor_split(
+            student_indices[torch.randperm(student_indices.numel(), device=self.device)],
+            effective_num_mini_batches,
+        )
+        for teacher_batch, student_batch in zip(teacher_splits, student_splits, strict=True):
+            batch_idx = torch.cat((teacher_batch, student_batch))
+            yield batch_idx[torch.randperm(batch_idx.numel(), device=self.device)]
+
+    @staticmethod
+    def _select_chunk_initial_states(
+        saved_hidden_states,
+        starts: torch.Tensor,
+        envs: torch.Tensor,
+    ) -> HiddenState:
+        if saved_hidden_states is None:
+            return None
+        selected = tuple(state[starts, envs] for state in saved_hidden_states)
+        return selected[0] if len(selected) == 1 else selected

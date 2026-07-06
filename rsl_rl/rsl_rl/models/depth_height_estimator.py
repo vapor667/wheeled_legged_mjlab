@@ -96,6 +96,57 @@ class DepthHeightEstimator(nn.Module):
     def get_initial_state(self, batch_size: int, *, device=None, dtype=None) -> torch.Tensor:
         return torch.zeros(batch_size, self.gru_hidden_dim, device=device, dtype=dtype)
 
+    def forward_sequence(
+        self,
+        proprio_history: torch.Tensor,
+        depth: torch.Tensor,
+        dones: torch.Tensor,
+        hidden_state: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Unroll a continuous chunk and reset recurrent state after terminal steps."""
+        if proprio_history.ndim != 3:
+            raise ValueError(
+                "proprio_history sequence must have shape [time, batch, proprio_history_dim], "
+                f"got {tuple(proprio_history.shape)}"
+            )
+        if depth.ndim != 5:
+            raise ValueError(
+                "depth sequence must have shape [time, batch, channels, height, width], "
+                f"got {tuple(depth.shape)}"
+            )
+        if tuple(dones.shape[:2]) != tuple(proprio_history.shape[:2]):
+            raise ValueError(
+                "dones sequence must share [time, batch] with proprio_history, "
+                f"got {tuple(dones.shape)}"
+            )
+
+        batch_size = proprio_history.shape[1]
+        if hidden_state is None:
+            hidden_state = self.get_initial_state(
+                batch_size,
+                device=proprio_history.device,
+                dtype=proprio_history.dtype,
+            )
+
+        latent_sequence = []
+        height_sequence = []
+        for step in range(proprio_history.shape[0]):
+            latent, height_hat, hidden_state = self(
+                proprio_history[step],
+                depth[step],
+                hidden_state,
+            )
+            latent_sequence.append(latent)
+            height_sequence.append(height_hat)
+            done_mask = dones[step].to(device=hidden_state.device, dtype=torch.bool).view(-1, 1)
+            hidden_state = torch.where(done_mask, torch.zeros_like(hidden_state), hidden_state)
+
+        return (
+            torch.stack(latent_sequence),
+            torch.stack(height_sequence),
+            hidden_state,
+        )
+
     def _check_inputs(
         self,
         proprio_history: torch.Tensor,

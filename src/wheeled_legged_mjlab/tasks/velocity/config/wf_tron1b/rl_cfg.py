@@ -48,6 +48,9 @@ class RslRlRepresentationTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
     proprio_encoder_learning_rate: float = 1.0e-3
     num_proprio_encoder_substeps: int = 1
+    num_representation_epochs: int = 1
+    num_representation_mini_batches: int = 4
+    representation_chunk_length: int = 8
     teacher_student_ratio: float | None = None
     class_name: str = "RepresentationTeacherStudentPPO"
 
@@ -124,6 +127,9 @@ def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
             proprio_encoder_learning_rate=1.0e-3,
             num_proprio_encoder_substeps=1,
+            num_representation_epochs=1,
+            num_representation_mini_batches=4,
+            representation_chunk_length=8,
         ),
         obs_groups={
             "teacher_actor": ("actor",),
@@ -182,6 +188,9 @@ def wf_tron1b_visual_cts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
             proprio_encoder_learning_rate=1.0e-3,
             num_proprio_encoder_substeps=1,
+            num_representation_epochs=1,
+            num_representation_mini_batches=4,
+            representation_chunk_length=8,
             teacher_student_ratio=1.0,
         ),
         obs_groups={

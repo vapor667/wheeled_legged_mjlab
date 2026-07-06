@@ -141,6 +141,44 @@ class VisualRepresentationActorCriticTests(unittest.TestCase):
         self.assertFalse(self.has_any_grad(model.privileged_encoder.parameters()))
         self.assertFalse(self.has_any_grad(model.height_pair.teacher_height_encoder.parameters()))
 
+    def test_sequence_representation_loss_updates_only_student_estimators(self) -> None:
+        model = self.make_model()
+        time_steps = 3
+        step_observations = [self.make_obs() for _ in range(time_steps)]
+        obs = TensorDict(
+            {
+                key: torch.stack([step_obs[key] for step_obs in step_observations])
+                for key in step_observations[0].keys()
+            },
+            batch_size=[time_steps, BATCH_SIZE],
+        )
+        dones = torch.zeros(time_steps, BATCH_SIZE, 1)
+        dones[1, 0] = 1.0
+        hidden_state = torch.zeros(BATCH_SIZE, model.height_pair.student_height_estimator.gru_hidden_dim)
+
+        model.zero_grad()
+        losses = model.compute_representation_losses_sequence(obs, dones, hidden_state)
+        losses["representation_total"].backward()
+
+        self.assertEqual(
+            set(losses),
+            {
+                "privileged_latent",
+                "privileged_reconstruction",
+                "privileged_total",
+                "height_latent",
+                "height_reconstruction",
+                "height_total",
+                "representation_total",
+            },
+        )
+        self.assertTrue(self.has_any_grad(model.proprio_encoder.parameters()))
+        self.assertTrue(self.has_any_grad(model.height_pair.student_height_estimator.parameters()))
+        self.assertFalse(self.has_any_grad(model.actor_head.parameters()))
+        self.assertFalse(self.has_any_grad(model.critic_head.parameters()))
+        self.assertFalse(self.has_any_grad(model.privileged_encoder.parameters()))
+        self.assertFalse(self.has_any_grad(model.height_pair.teacher_height_encoder.parameters()))
+
     def test_actor_head_uses_privileged_and_height_latents(self) -> None:
         model = self.make_model()
 

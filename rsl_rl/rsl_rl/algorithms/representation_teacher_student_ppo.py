@@ -33,6 +33,9 @@ class RepresentationTeacherStudentPPO:
         learning_rate: float = 0.001,
         proprio_encoder_learning_rate: float = 0.001,
         num_proprio_encoder_substeps: int = 1,
+        num_representation_epochs: int | None = None,
+        num_representation_mini_batches: int | None = None,
+        representation_chunk_length: int = 8,
         max_grad_norm: float = 1.0,
         optimizer: str = "adam",
         use_clipped_value_loss: bool = True,
@@ -89,6 +92,17 @@ class RepresentationTeacherStudentPPO:
         self.learning_rate = learning_rate
         self.proprio_encoder_learning_rate = proprio_encoder_learning_rate
         self.num_proprio_encoder_substeps = num_proprio_encoder_substeps
+        self.num_representation_epochs = (
+            num_proprio_encoder_substeps
+            if num_representation_epochs is None
+            else num_representation_epochs
+        )
+        self.num_representation_mini_batches = (
+            num_mini_batches
+            if num_representation_mini_batches is None
+            else num_representation_mini_batches
+        )
+        self.representation_chunk_length = representation_chunk_length
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
         self.rnd = None
         self.teacher_mask = self._make_teacher_mask(storage.num_envs, teacher_student_ratio)
@@ -104,17 +118,24 @@ class RepresentationTeacherStudentPPO:
             self.transition.values = self.actor.evaluate_teacher(obs).detach()
         else:
             self.transition.teacher_mask = self.teacher_mask
-            self.transition.actions = self.actor.act_mixed(
+            mixed_output = self.actor.act_mixed(
                 obs,
                 self.teacher_mask,
                 hidden_state=actor_hidden_state,
                 stochastic_output=True,
                 update_hidden_state=True,
-            ).detach()
+                return_student_latent=True,
+            )
+            if not isinstance(mixed_output, tuple):
+                raise RuntimeError("Mixed rollout must return actions and the student latent")
+            actions, student_latent = mixed_output
+            self.transition.actions = actions.detach()
+            self.transition.student_latent = student_latent.detach()
             self.transition.values = self.actor.evaluate_mixed(
                 obs,
                 self.teacher_mask,
                 hidden_state=actor_hidden_state,
+                student_latent=self.transition.student_latent,
             ).detach()
         self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()
         self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
@@ -162,36 +183,58 @@ class RepresentationTeacherStudentPPO:
             st.returns[step] = advantage + st.values[step]
         st.advantages = st.returns - st.values
         if not self.normalize_advantage_per_mini_batch:
-            st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std() + 1e-8)
+            st.advantages = self._normalize_grouped_advantages(st.advantages, st.teacher_masks)
 
     def update(self) -> dict[str, float]:
+        loss_dict = self._update_ppo_phase()
+        representation_losses = self._update_representation_phase()
+        loss_dict["representation"] = representation_losses["representation_total"]
+        for key, value in representation_losses.items():
+            if key not in {"representation_total", "height_total"}:
+                loss_dict[key] = value
+        if self.teacher_mask is not None and self._reward_sample_count > 0:
+            loss_dict["CTS/teacher_mean_step_reward"] = self._teacher_reward_sum / self._reward_sample_count
+            loss_dict["CTS/student_mean_step_reward"] = self._student_reward_sum / self._reward_sample_count
+            self._teacher_reward_sum = 0.0
+            self._student_reward_sum = 0.0
+            self._reward_sample_count = 0
+        self.storage.clear()
+        return loss_dict
+
+    def _update_ppo_phase(self) -> dict[str, float]:
         mean_value_loss = 0.0
         mean_surrogate_loss = 0.0
         mean_entropy = 0.0
-        mean_representation_losses: dict[str, float] = {}
+        num_updates = 0
+
+        self.proprio_optimizer.zero_grad()
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for batch in generator:
             original_batch_size = batch.observations.batch_size[0]
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
-                    batch.advantages = (batch.advantages - batch.advantages.mean()) / (batch.advantages.std() + 1e-8)
+                    batch.advantages = self._normalize_grouped_advantages(
+                        batch.advantages,
+                        batch.teacher_mask,
+                    )
 
-            actor_hidden_state = batch.hidden_states[0]
             if batch.teacher_mask is None:
                 self.actor.act_teacher(batch.observations, stochastic_output=True)
                 values = self.actor.evaluate_teacher(batch.observations)
             else:
+                if batch.student_latents is None:
+                    raise RuntimeError("Concurrent PPO requires rollout-cached student latents")
                 self.actor.act_mixed(
                     batch.observations,
                     batch.teacher_mask,
-                    hidden_state=actor_hidden_state,
                     stochastic_output=True,
+                    student_latent=batch.student_latents.detach(),
                 )
                 values = self.actor.evaluate_mixed(
                     batch.observations,
                     batch.teacher_mask,
-                    hidden_state=actor_hidden_state,
+                    student_latent=batch.student_latents.detach(),
                 )
             actions_log_prob = self.actor.get_output_log_prob(batch.actions)
             distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
@@ -221,17 +264,28 @@ class RepresentationTeacherStudentPPO:
             surrogate_clipped = -torch.squeeze(batch.advantages) * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            surrogate_loss = self._grouped_objective(
+                torch.max(surrogate, surrogate_clipped),
+                batch.teacher_mask,
+            )
 
             if self.use_clipped_value_loss:
                 value_clipped = batch.values + (values - batch.values).clamp(-self.clip_param, self.clip_param)
                 value_losses = (values - batch.returns).pow(2)
                 value_losses_clipped = (value_clipped - batch.returns).pow(2)
-                value_loss = torch.max(value_losses, value_losses_clipped).mean()
+                value_loss = self._grouped_objective(
+                    torch.max(value_losses, value_losses_clipped),
+                    batch.teacher_mask,
+                )
             else:
-                value_loss = (batch.returns - values).pow(2).mean()
+                value_loss = self._grouped_objective(
+                    (batch.returns - values).pow(2),
+                    batch.teacher_mask,
+                )
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
+            entropy_loss = self._grouped_objective(entropy, batch.teacher_mask)
+
+            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_loss
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -240,48 +294,46 @@ class RepresentationTeacherStudentPPO:
             nn.utils.clip_grad_norm_(self.actor.ppo_parameters(), self.max_grad_norm)
             self.optimizer.step()
 
-            representation_loss_values: dict[str, float] = {}
-            for _ in range(self.num_proprio_encoder_substeps):
-                representation_losses = self.actor.compute_representation_losses(
-                    batch.observations,
-                    hidden_state=actor_hidden_state,
-                )
-                representation_loss = representation_losses["representation_total"]
-                self.proprio_optimizer.zero_grad()
-                representation_loss.backward()
-                if self.is_multi_gpu:
-                    self.reduce_parameters(self.actor.representation_parameters())
-                nn.utils.clip_grad_norm_(self.actor.representation_parameters(), self.max_grad_norm)
-                self.proprio_optimizer.step()
-                for key, value in representation_losses.items():
-                    representation_loss_values[key] = representation_loss_values.get(key, 0.0) + value.item()
-            for key in representation_loss_values:
-                representation_loss_values[key] /= self.num_proprio_encoder_substeps
-
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
-            mean_entropy += entropy.mean().item()
-            for key, value in representation_loss_values.items():
-                mean_representation_losses[key] = mean_representation_losses.get(key, 0.0) + value
+            mean_entropy += entropy_loss.item()
+            num_updates += 1
 
-        num_updates = self.num_learning_epochs * self.num_mini_batches
-        loss_dict = {
+        return {
             "value": mean_value_loss / num_updates,
             "surrogate": mean_surrogate_loss / num_updates,
             "entropy": mean_entropy / num_updates,
-            "representation": mean_representation_losses["representation_total"] / num_updates,
         }
-        for key, value in mean_representation_losses.items():
-            if key not in {"representation_total", "height_total"}:
-                loss_dict[key] = value / num_updates
-        if self.teacher_mask is not None and self._reward_sample_count > 0:
-            loss_dict["CTS/teacher_mean_step_reward"] = self._teacher_reward_sum / self._reward_sample_count
-            loss_dict["CTS/student_mean_step_reward"] = self._student_reward_sum / self._reward_sample_count
-            self._teacher_reward_sum = 0.0
-            self._student_reward_sum = 0.0
-            self._reward_sample_count = 0
-        self.storage.clear()
-        return loss_dict
+
+    def _update_representation_phase(self) -> dict[str, float]:
+        mean_losses: dict[str, float] = {}
+        num_updates = 0
+
+        self.optimizer.zero_grad()
+        generator = self.storage.representation_chunk_generator(
+            self.num_representation_mini_batches,
+            self.num_representation_epochs,
+            self.representation_chunk_length,
+            student_only=self.teacher_mask is not None,
+        )
+        for batch in generator:
+            representation_losses = self.actor.compute_representation_losses_sequence(
+                batch.observations,
+                batch.dones,
+                hidden_state=batch.hidden_states[0],
+            )
+            self.proprio_optimizer.zero_grad()
+            representation_losses["representation_total"].backward()
+            if self.is_multi_gpu:
+                self.reduce_parameters(self.actor.representation_parameters())
+            nn.utils.clip_grad_norm_(self.actor.representation_parameters(), self.max_grad_norm)
+            self.proprio_optimizer.step()
+
+            for key, value in representation_losses.items():
+                mean_losses[key] = mean_losses.get(key, 0.0) + value.item()
+            num_updates += 1
+
+        return {key: value / num_updates for key, value in mean_losses.items()}
 
     def train_mode(self) -> None:
         self.actor.train()
@@ -360,6 +412,33 @@ class RepresentationTeacherStudentPPO:
                 numel = param.numel()
                 param.grad.data.copy_(all_grads[offset : offset + numel].view_as(param.grad.data))
                 offset += numel
+
+    @staticmethod
+    def _grouped_objective(
+        values: torch.Tensor,
+        teacher_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if teacher_mask is None:
+            return values.mean()
+        mask = teacher_mask.view(-1)
+        return 0.5 * (values[mask].mean() + values[~mask].mean())
+
+    @staticmethod
+    def _normalize_grouped_advantages(
+        advantages: torch.Tensor,
+        teacher_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if teacher_mask is None:
+            return (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        normalized = torch.empty_like(advantages)
+        mask = teacher_mask.to(dtype=torch.bool).expand_as(advantages)
+        for group_mask in (mask, ~mask):
+            group_advantages = advantages[group_mask]
+            normalized[group_mask] = (
+                group_advantages - group_advantages.mean()
+            ) / (group_advantages.std() + 1e-8)
+        return normalized
 
     def _make_teacher_mask(
         self, num_envs: int, teacher_student_ratio: float | None

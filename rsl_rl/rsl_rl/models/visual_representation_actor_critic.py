@@ -186,16 +186,26 @@ class VisualRepresentationActorCritic(nn.Module):
         hidden_state: HiddenState = None,
         stochastic_output: bool = False,
         update_hidden_state: bool = False,
-    ) -> torch.Tensor:
+        student_latent: torch.Tensor | None = None,
+        return_student_latent: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
         actor_obs = self.get_mixed_actor_obs(obs, teacher_mask)
-        student_latent, next_hidden_state = self._get_student_latent_and_hidden(obs, hidden_state)
+        next_hidden_state = None
+        if student_latent is None:
+            student_latent, next_hidden_state = self._get_student_latent_and_hidden(obs, hidden_state)
+        elif update_hidden_state:
+            raise ValueError("A cached student latent cannot update the recurrent hidden state")
         teacher_latent = self.get_teacher_latent(obs)
         teacher_mask = self._validate_teacher_mask(teacher_mask, student_latent.shape[0])
         latent = torch.where(teacher_mask, teacher_latent, student_latent.detach())
         if update_hidden_state:
+            assert next_hidden_state is not None
             self._student_hidden_state = next_hidden_state.detach()
-        return self._actor(actor_obs, latent, stochastic_output=stochastic_output)
+        actions = self._actor(actor_obs, latent, stochastic_output=stochastic_output)
+        if return_student_latent:
+            return actions, student_latent.detach()
+        return actions
 
     def evaluate_teacher(
         self,
@@ -214,10 +224,12 @@ class VisualRepresentationActorCritic(nn.Module):
         teacher_mask: torch.Tensor,
         masks: torch.Tensor | None = None,
         hidden_state: HiddenState = None,
+        student_latent: torch.Tensor | None = None,
     ) -> torch.Tensor:
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
         critic_obs = self.get_critic_obs(obs)
-        student_latent, _ = self._get_student_latent_and_hidden(obs, hidden_state)
+        if student_latent is None:
+            student_latent, _ = self._get_student_latent_and_hidden(obs, hidden_state)
         teacher_latent = self.get_teacher_latent(obs)
         teacher_mask = self._validate_teacher_mask(teacher_mask, student_latent.shape[0])
         latent = torch.where(teacher_mask, teacher_latent, student_latent.detach())
@@ -240,7 +252,7 @@ class VisualRepresentationActorCritic(nn.Module):
     ) -> dict[str, torch.Tensor]:
         proprio_latent, privileged_hat = self.get_student_privileged_output(obs)
         privileged_latent = self.get_privileged_latent(obs).detach()
-        privileged_latent_loss = F.mse_loss(proprio_latent, privileged_latent)
+        privileged_latent_loss = self._latent_mse(proprio_latent, privileged_latent)
         privileged_reconstruction_loss = F.mse_loss(
             privileged_hat,
             self.get_privileged_obs(obs).detach(),
@@ -260,6 +272,72 @@ class VisualRepresentationActorCritic(nn.Module):
         self, obs: TensorDict, hidden_state: HiddenState = None
     ) -> dict[str, torch.Tensor]:
         return self.compute_visual_representation_loss(obs, hidden_state=hidden_state)
+
+    def compute_representation_losses_sequence(
+        self,
+        obs: TensorDict,
+        dones: torch.Tensor,
+        hidden_state: HiddenState = None,
+    ) -> dict[str, torch.Tensor]:
+        """Compute all four Visual-CTS losses over a continuous trajectory chunk."""
+        if len(obs.batch_size) != 2:
+            raise ValueError(f"Expected sequence observations with [time, batch], got {obs.batch_size}")
+        if hidden_state is not None and not isinstance(hidden_state, torch.Tensor):
+            raise ValueError("Visual height estimator expects a tensor GRU hidden state")
+
+        time_steps, batch_size = obs.batch_size
+        student_history = self._cat_obs(obs, self.student_history_obs_groups)
+        proprio_obs = self.proprio_obs_normalizer(
+            student_history.flatten(start_dim=2)
+        )
+        privileged_obs = self.privileged_obs_normalizer(
+            self._cat_obs(obs, self.privileged_encoder_obs_groups)
+        )
+        flat_proprio_obs = proprio_obs.flatten(0, 1)
+        flat_privileged_obs = privileged_obs.flatten(0, 1)
+
+        student_privileged_latent = self._normalize_latent(
+            self.proprio_encoder(flat_proprio_obs)
+        ).view(time_steps, batch_size, self.latent_dim)
+        privileged_hat = self.privileged_decoder(
+            student_privileged_latent.flatten(0, 1)
+        ).view(time_steps, batch_size, self.privileged_encoder_obs_dim)
+        with torch.no_grad():
+            teacher_privileged_latent = self._normalize_latent(
+                self.privileged_encoder(flat_privileged_obs)
+            ).view(time_steps, batch_size, self.latent_dim)
+
+        privileged_latent_loss = self._latent_mse(
+            student_privileged_latent,
+            teacher_privileged_latent,
+        )
+        privileged_reconstruction_loss = F.mse_loss(privileged_hat, privileged_obs.detach())
+        privileged_total = privileged_latent_loss + privileged_reconstruction_loss
+
+        height_scan = self._get_height_scan_sequence(obs)
+        height_output = self.height_pair.forward_sequence(
+            height_scan,
+            proprio_obs,
+            obs[self.depth_obs_group],
+            dones,
+            hidden_state,
+        )
+        height_latent_loss = self._latent_mse(
+            height_output.student_height_latent,
+            height_output.teacher_height_latent.detach(),
+        )
+        height_reconstruction_loss = F.mse_loss(height_output.height_hat, height_scan)
+        height_total = height_latent_loss + height_reconstruction_loss
+        representation_total = privileged_total + height_total
+        return {
+            "privileged_latent": privileged_latent_loss,
+            "privileged_reconstruction": privileged_reconstruction_loss,
+            "privileged_total": privileged_total,
+            "height_latent": height_latent_loss,
+            "height_reconstruction": height_reconstruction_loss,
+            "height_total": height_total,
+            "representation_total": representation_total,
+        }
 
     def compute_representation_loss(self, obs: TensorDict, hidden_state: HiddenState = None) -> torch.Tensor:
         return self.compute_representation_losses(obs, hidden_state=hidden_state)["representation_total"]
@@ -433,6 +511,17 @@ class VisualRepresentationActorCritic(nn.Module):
 
     def _normalize_latent(self, latent: torch.Tensor) -> torch.Tensor:
         return F.normalize(latent, p=2.0, dim=-1) if self.normalize_latent else latent
+
+    @staticmethod
+    def _latent_mse(student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+        return F.mse_loss(student, teacher, reduction="none").sum(dim=-1).mean()
+
+    def _get_height_scan_sequence(self, obs: TensorDict) -> torch.Tensor:
+        if self.height_obs_groups is not None:
+            return self._cat_obs(obs, self.height_obs_groups)
+        assert self.height_scan_start is not None
+        critic_raw = self._cat_obs(obs, self.critic_obs_groups)
+        return critic_raw[..., self.height_scan_start : self.height_scan_start + self.height_dim]
 
     def _get_student_latent_and_hidden(
         self, obs: TensorDict, hidden_state: HiddenState = None

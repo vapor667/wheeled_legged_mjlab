@@ -141,10 +141,85 @@ class VisualRepresentationTeacherStudentPPOTests(unittest.TestCase):
         for step_mask in alg.storage.teacher_masks:
             self.assertTrue(torch.equal(step_mask.squeeze(-1), expected_mask))
         self.assertIsNotNone(alg.storage.saved_hidden_state_a)
+        self.assertIsNotNone(alg.storage.student_latents)
+        self.assertEqual(
+            tuple(alg.storage.student_latents.shape),
+            (NUM_STEPS, NUM_ENVS, alg.actor.latent_dim + alg.actor.height_latent_dim),
+        )
         self.assertEqual(
             tuple(alg.storage.saved_hidden_state_a[0].shape),
             (NUM_STEPS, NUM_ENVS, alg.actor.height_pair.student_height_estimator.gru_hidden_dim),
         )
+
+    def test_ppo_and_representation_phases_update_disjoint_parameters(self) -> None:
+        alg, obs = self.build_algorithm()
+        self.fill_rollout(alg, obs)
+
+        actor_before = self.clone_named_parameters(alg.actor.actor_head)
+        student_privileged_before = self.clone_named_parameters(alg.actor.proprio_encoder)
+        student_height_before = self.clone_named_parameters(alg.actor.height_pair.student_height_estimator)
+        alg._update_ppo_phase()
+
+        self.assertTrue(self.any_param_changed(actor_before, alg.actor.actor_head))
+        self.assertFalse(self.any_param_changed(student_privileged_before, alg.actor.proprio_encoder))
+        self.assertFalse(
+            self.any_param_changed(student_height_before, alg.actor.height_pair.student_height_estimator)
+        )
+
+        actor_before = self.clone_named_parameters(alg.actor.actor_head)
+        critic_before = self.clone_named_parameters(alg.actor.critic_head)
+        teacher_privileged_before = self.clone_named_parameters(alg.actor.privileged_encoder)
+        teacher_height_before = self.clone_named_parameters(alg.actor.height_pair.teacher_height_encoder)
+        student_height_before = self.clone_named_parameters(alg.actor.height_pair.student_height_estimator)
+        alg._update_representation_phase()
+
+        self.assertFalse(self.any_param_changed(actor_before, alg.actor.actor_head))
+        self.assertFalse(self.any_param_changed(critic_before, alg.actor.critic_head))
+        self.assertFalse(self.any_param_changed(teacher_privileged_before, alg.actor.privileged_encoder))
+        self.assertFalse(
+            self.any_param_changed(teacher_height_before, alg.actor.height_pair.teacher_height_encoder)
+        )
+        self.assertTrue(
+            self.any_param_changed(student_height_before, alg.actor.height_pair.student_height_estimator)
+        )
+
+    def test_ppo_phase_uses_cached_student_latents_without_estimator_forward(self) -> None:
+        alg, obs = self.build_algorithm()
+        self.fill_rollout(alg, obs)
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("student estimator must not run during PPO update")
+
+        alg.actor.proprio_encoder.forward = fail_if_called
+        alg.actor.height_pair.student_height_estimator.forward = fail_if_called
+        alg._update_ppo_phase()
+
+    def test_ppo_batches_are_teacher_student_stratified(self) -> None:
+        alg, obs = self.build_algorithm()
+        self.fill_rollout(alg, obs)
+
+        batches = list(alg.storage.mini_batch_generator(num_mini_batches=2, num_epochs=1))
+        self.assertEqual(len(batches), 2)
+        for batch in batches:
+            mask = batch.teacher_mask.view(-1)
+            self.assertEqual(int(mask.sum()), int((~mask).sum()))
+
+    def test_representation_chunks_only_contain_student_trajectories(self) -> None:
+        alg, obs = self.build_algorithm()
+        self.fill_rollout(alg, obs)
+
+        batches = list(
+            alg.storage.representation_chunk_generator(
+                num_mini_batches=2,
+                num_epochs=1,
+                chunk_length=2,
+                student_only=True,
+            )
+        )
+        self.assertTrue(batches)
+        for batch in batches:
+            self.assertEqual(batch.observations.batch_size[0], 2)
+            self.assertFalse(batch.teacher_mask.any())
 
     def test_teacher_student_mask_balances_contiguous_terrain_type_ranges(self) -> None:
         alg, _ = self.build_algorithm()

@@ -7,7 +7,10 @@ import math
 import os
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 import unittest
+
+import torch
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
@@ -15,6 +18,7 @@ from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_run
 
 import wheeled_legged_mjlab  # noqa: F401
 from rsl_rl.models import VisualRepresentationActorCritic
+from scripts.rsl_rl.play import _AutoResetPolicy
 from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_CAPTURE_FREQUENCY_HZ,
@@ -31,6 +35,36 @@ VISUAL_CTS_PRIVILEGED_DIM = 42
 
 
 class VisualCTSDataProbeTests(unittest.TestCase):
+    def test_play_policy_resets_auto_reset_environments(self) -> None:
+        class RecordingPolicy:
+            def __init__(self) -> None:
+                self.reset_calls: list[torch.Tensor | None] = []
+
+            def __call__(self, obs) -> torch.Tensor:
+                return obs
+
+            def reset(self, dones: torch.Tensor | None = None) -> None:
+                self.reset_calls.append(None if dones is None else dones.clone())
+
+        env = SimpleNamespace(
+            unwrapped=SimpleNamespace(reset_buf=torch.tensor([False, False]))
+        )
+        policy = RecordingPolicy()
+        wrapped = _AutoResetPolicy(policy, env)
+
+        self.assertEqual(policy.reset_calls, [None])
+        wrapped(torch.zeros(2, 1))
+        self.assertEqual(policy.reset_calls, [None])
+
+        env.unwrapped.reset_buf = torch.tensor([True, False])
+        wrapped(torch.zeros(2, 1))
+        self.assertTrue(
+            torch.equal(policy.reset_calls[-1], torch.tensor([True, False]))
+        )
+
+        wrapped.reset()
+        self.assertIsNone(policy.reset_calls[-1])
+
     def test_depth_height_and_history_are_available_but_not_training_inputs(self) -> None:
         self.assertIn(DEPTH_PROBE_TASK_ID, set(list_tasks()))
 
@@ -116,6 +150,9 @@ class VisualCTSDataProbeTests(unittest.TestCase):
         self.assertEqual(agent["actor"]["height_teacher_hidden_dims"], (512, 256))
         self.assertEqual(agent["actor"]["height_proprio_hidden_dims"], (512, 256))
         self.assertEqual(agent["actor"]["privileged_decoder_hidden_dims"], (256, 512))
+        self.assertEqual(agent["algorithm"]["num_representation_epochs"], 1)
+        self.assertEqual(agent["algorithm"]["num_representation_mini_batches"], 4)
+        self.assertEqual(agent["algorithm"]["representation_chunk_length"], 8)
         self.assertEqual(agent["algorithm"]["teacher_student_ratio"], 1.0)
         self.assertIsNotNone(load_runner_cls(VISUAL_CTS_TASK_ID))
 
@@ -173,7 +210,6 @@ class VisualCTSDataProbeTests(unittest.TestCase):
         "set RUN_VISUAL_CTS_LIVE_TRAIN_SMOKE=1 to run one real Visual-CTS update",
     )
     def test_live_visual_cts_runner_completes_one_update(self) -> None:
-        import torch
         import warp as wp
         from mjlab.envs import ManagerBasedRlEnv
         from mjlab.rl import RslRlVecEnvWrapper
@@ -218,13 +254,13 @@ class VisualCTSDataProbeTests(unittest.TestCase):
                 )
             )
             obs = wrapped_env.get_observations()
-            self.assertEqual(obs["privileged"].shape[-1], VISUAL_CTS_PRIVILEGED_DIM)
+            privileged_dim = obs["privileged"].shape[-1]
             self.assertTrue(
                 torch.allclose(
                     obs["height_scan"],
                     obs["critic"][
                         :,
-                        VISUAL_CTS_PRIVILEGED_DIM : VISUAL_CTS_PRIVILEGED_DIM
+                        privileged_dim : privileged_dim
                         + math.prod(TERRAIN_SCAN_GRID_SHAPE),
                     ],
                 )

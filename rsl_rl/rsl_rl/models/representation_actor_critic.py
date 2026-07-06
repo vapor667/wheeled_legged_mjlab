@@ -126,13 +126,25 @@ class RepresentationActorCritic(nn.Module):
         hidden_state: HiddenState = None,
         stochastic_output: bool = False,
         update_hidden_state: bool = False,
-    ) -> torch.Tensor:
+        student_latent: torch.Tensor | None = None,
+        return_student_latent: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run teacher and student environments through one shared action distribution."""
         del update_hidden_state
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
         actor_obs = self.get_mixed_actor_obs(obs, teacher_mask)
-        latent = self.get_mixed_latent(obs, teacher_mask, hidden_state=hidden_state)
-        return self._actor(actor_obs, latent, stochastic_output=stochastic_output)
+        if student_latent is None:
+            student_latent = self.get_student_latent(obs, hidden_state=hidden_state)
+        latent = self.get_mixed_latent(
+            obs,
+            teacher_mask,
+            hidden_state=hidden_state,
+            student_latent=student_latent,
+        )
+        actions = self._actor(actor_obs, latent, stochastic_output=stochastic_output)
+        if return_student_latent:
+            return actions, student_latent.detach()
+        return actions
 
     def evaluate_teacher(
         self,
@@ -153,11 +165,17 @@ class RepresentationActorCritic(nn.Module):
         teacher_mask: torch.Tensor,
         masks: torch.Tensor | None = None,
         hidden_state: HiddenState = None,
+        student_latent: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Evaluate the shared critic on the path used for each environment."""
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
         critic_obs = self.get_critic_obs(obs)
-        latent = self.get_mixed_latent(obs, teacher_mask, hidden_state=hidden_state)
+        latent = self.get_mixed_latent(
+            obs,
+            teacher_mask,
+            hidden_state=hidden_state,
+            student_latent=student_latent,
+        )
         return self.critic_head(torch.cat((critic_obs, latent), dim=-1))
 
     def compute_representation_loss(self, obs: TensorDict, hidden_state: HiddenState = None) -> torch.Tensor:
@@ -172,6 +190,16 @@ class RepresentationActorCritic(nn.Module):
         self, obs: TensorDict, hidden_state: HiddenState = None
     ) -> dict[str, torch.Tensor]:
         return {"representation_total": self.compute_representation_loss(obs, hidden_state=hidden_state)}
+
+    def compute_representation_losses_sequence(
+        self,
+        obs: TensorDict,
+        dones: torch.Tensor,
+        hidden_state: HiddenState = None,
+    ) -> dict[str, torch.Tensor]:
+        """Compute the feed-forward representation loss over a trajectory chunk."""
+        del dones, hidden_state
+        return self.compute_representation_losses(obs.flatten(0, 1))
 
     def ppo_parameters(self):
         """Yield parameters optimized by PPO."""
@@ -237,8 +265,10 @@ class RepresentationActorCritic(nn.Module):
         obs: TensorDict,
         teacher_mask: torch.Tensor,
         hidden_state: HiddenState = None,
+        student_latent: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        student_latent = self.get_student_latent(obs, hidden_state=hidden_state)
+        if student_latent is None:
+            student_latent = self.get_student_latent(obs, hidden_state=hidden_state)
         teacher_latent = self.get_teacher_latent(obs, hidden_state=hidden_state)
         teacher_mask = self._validate_teacher_mask(teacher_mask, student_latent.shape[0])
         return torch.where(teacher_mask, teacher_latent, student_latent.detach())

@@ -83,6 +83,24 @@ def _select_play_policy(policy, policy_role: Literal["student", "teacher"]):
   return TeacherPolicy(policy)
 
 
+class _AutoResetPolicy:
+  """Reset recurrent state for environments auto-reset by the previous step."""
+
+  def __init__(self, policy, env: RslRlVecEnvWrapper):
+    self.policy = policy
+    self.env = env
+    self.reset()
+
+  def __call__(self, obs) -> torch.Tensor:
+    reset_envs = self.env.unwrapped.reset_buf
+    if torch.any(reset_envs):
+      self.policy.reset(reset_envs)
+    return self.policy(obs)
+
+  def reset(self, *args, **kwargs):
+    return self.policy.reset(*args, **kwargs)
+
+
 def run_play(task_id: str, cfg: PlayConfig):
   configure_torch_backends()
 
@@ -238,7 +256,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       assert log_dir is not None
       runner.export_policy_to_onnx(str(log_dir), "policy.onnx")
       print(f"[INFO]: Exported student policy to {log_dir / 'policy.onnx'}")
-    policy = runner.get_inference_policy(device=device)
+    policy = _AutoResetPolicy(runner.get_inference_policy(device=device), env)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
@@ -252,8 +270,11 @@ def run_play(task_id: str, cfg: PlayConfig):
         strict=True,
         map_location=device,
       )
-      return _select_play_policy(
-        _ckpt_runner.get_inference_policy(device=device), cfg.policy_role
+      return _AutoResetPolicy(
+        _select_play_policy(
+          _ckpt_runner.get_inference_policy(device=device), cfg.policy_role
+        ),
+        env,
       )
 
     if cfg.wandb_run_path is None:

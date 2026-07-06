@@ -148,3 +148,13 @@ def test_unsupported_options_fail_loudly() -> None:
         RepresentationTeacherStudentPPO(make_model(obs), storage, symmetry_cfg={})
     with pytest.raises(ValueError, match="CNN encoder sharing"):
         RepresentationTeacherStudentPPO(make_model(obs), storage, share_cnn_encoders=True)
+
+
+def test_grouped_objective_averages_teacher_and_student_means() -> None:
+    values = torch.tensor([1.0, 3.0, 5.0, 7.0])
+    teacher_mask = torch.tensor([True, False, False, False])
+
+    objective = RepresentationTeacherStudentPPO._grouped_objective(values, teacher_mask)
+
+    assert objective.item() == pytest.approx(3.0)
+    assert RepresentationTeacherStudentPPO._grouped_objective(values, None).item() == pytest.approx(4.0)

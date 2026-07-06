@@ -74,6 +74,46 @@ class DepthHeightEstimatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected hidden_state shape"):
             estimator(proprio_history, depth, torch.randn(BATCH_SIZE, GRU_HIDDEN_DIM + 1))
 
+    def test_sequence_unroll_resets_after_done_and_backpropagates_through_time(self) -> None:
+        estimator = self.make_estimator()
+        time_steps = 4
+        proprio_history = torch.randn(time_steps, BATCH_SIZE, PROPRIO_HISTORY_DIM)
+        depth = torch.randn(time_steps, BATCH_SIZE, *DEPTH_SHAPE, requires_grad=True)
+        dones = torch.zeros(time_steps, BATCH_SIZE, 1)
+        dones[1, 0] = 1.0
+        initial_hidden = estimator.get_initial_state(BATCH_SIZE, dtype=proprio_history.dtype)
+
+        latents, height_hats, final_hidden = estimator.forward_sequence(
+            proprio_history,
+            depth,
+            dones,
+            initial_hidden,
+        )
+
+        manual_hidden = initial_hidden
+        manual_latents = []
+        for step in range(time_steps):
+            latent, _, manual_hidden = estimator(
+                proprio_history[step],
+                depth[step],
+                manual_hidden,
+            )
+            manual_latents.append(latent)
+            manual_hidden = torch.where(
+                dones[step].bool().view(-1, 1),
+                torch.zeros_like(manual_hidden),
+                manual_hidden,
+            )
+
+        self.assertEqual(latents.shape, (time_steps, BATCH_SIZE, HEIGHT_LATENT_DIM))
+        self.assertEqual(height_hats.shape, (time_steps, BATCH_SIZE, HEIGHT_DIM))
+        self.assertTrue(torch.allclose(latents, torch.stack(manual_latents)))
+        self.assertTrue(torch.allclose(final_hidden, manual_hidden))
+
+        latents[-1, 1].sum().backward()
+        self.assertIsNotNone(depth.grad)
+        self.assertTrue(torch.any(depth.grad[0, 1] != 0))
+
 
 if __name__ == "__main__":
     unittest.main()

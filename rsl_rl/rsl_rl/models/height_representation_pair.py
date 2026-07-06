@@ -78,7 +78,8 @@ class HeightRepresentationPair(nn.Module):
         hidden_state: torch.Tensor | None = None,
     ) -> HeightRepresentationOutput:
         self._check_height_scan(height_scan)
-        teacher_height_latent = self.encode_teacher(height_scan)
+        with torch.no_grad():
+            teacher_height_latent = self.encode_teacher(height_scan)
         student_height_latent, height_hat, next_hidden_state = self.student_height_estimator(
             proprio_history,
             depth,
@@ -102,7 +103,7 @@ class HeightRepresentationPair(nn.Module):
         height_scan: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         self._check_height_scan(height_scan)
-        height_latent_loss = F.mse_loss(
+        height_latent_loss = self._latent_mse(
             output.student_height_latent,
             output.teacher_height_latent.detach(),
         )
@@ -113,8 +114,48 @@ class HeightRepresentationPair(nn.Module):
             "height_total": height_latent_loss + height_reconstruction_loss,
         }
 
+    def forward_sequence(
+        self,
+        height_scan: torch.Tensor,
+        proprio_history: torch.Tensor,
+        depth: torch.Tensor,
+        dones: torch.Tensor,
+        hidden_state: torch.Tensor | None = None,
+    ) -> HeightRepresentationOutput:
+        """Encode teacher targets and unroll the student estimator over a chunk."""
+        if height_scan.ndim != 3 or height_scan.shape[-1] != self.height_dim:
+            raise ValueError(
+                "height_scan sequence must have shape [time, batch, height_dim], "
+                f"got {tuple(height_scan.shape)}"
+            )
+        flat_height_scan = height_scan.flatten(0, 1)
+        with torch.no_grad():
+            teacher_height_latent = self.encode_teacher(flat_height_scan).view(
+                *height_scan.shape[:2],
+                self.height_latent_dim,
+            )
+        student_height_latent, height_hat, next_hidden_state = (
+            self.student_height_estimator.forward_sequence(
+                proprio_history,
+                depth,
+                dones,
+                hidden_state,
+            )
+        )
+        return HeightRepresentationOutput(
+            teacher_height_latent=teacher_height_latent,
+            student_height_latent=student_height_latent,
+            height_hat=height_hat,
+            next_hidden_state=next_hidden_state,
+        )
+
     def _check_height_scan(self, height_scan: torch.Tensor) -> None:
         if height_scan.ndim != 2:
             raise ValueError(f"height_scan must have shape [batch, height_dim], got {tuple(height_scan.shape)}")
         if height_scan.shape[1] != self.height_dim:
             raise ValueError(f"expected height_scan dim {self.height_dim}, got {height_scan.shape[1]}")
+
+    @staticmethod
+    def _latent_mse(student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+        """Average squared distance on the unit sphere without feature averaging."""
+        return F.mse_loss(student, teacher, reduction="none").sum(dim=-1).mean()
