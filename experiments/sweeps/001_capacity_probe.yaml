@@ -1,0 +1,86 @@
+name: capacity_probe
+base_task: Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth
+max_iterations: 5000
+seeds: [0, 1]
+
+variants:
+  B0_baseline:
+    desc: Current depth representation velocity baseline.
+
+  U1_depth_32x48:
+    desc: Increase depth image resolution only.
+    env:
+      depth_camera_width: 32
+      depth_camera_height: 48
+
+  U2_depth_3frames:
+    desc: Feed an explicit 3-frame depth buffer.
+    env:
+      depth:
+        mode: buffer
+        buffer_size: 3
+        update_period: 2
+
+  U3_big_net:
+    desc: Increase representation and depth encoder capacity only.
+    rl:
+      latent_dim: 64
+      depth_feature_dim: 128
+      depth_gru_hidden_dim: 128
+      depth_channels: [32, 64, 64]
+
+  U4_front_height_scan:
+    desc: Extend the privileged terrain scan forward.
+    env:
+      terrain_scan:
+        x_back: 0.3
+        x_front: 1.2
+        y_half: 0.5
+        resolution: 0.1
+
+  U5_big_inputs:
+    desc: Increase depth resolution, explicit depth history, and forward terrain scan.
+    env:
+      depth_camera_width: 32
+      depth_camera_height: 48
+      depth:
+        mode: buffer
+        buffer_size: 3
+        update_period: 2
+      terrain_scan:
+        x_back: 0.3
+        x_front: 1.2
+        y_half: 0.5
+        resolution: 0.1
+
+  U6_big_model:
+    desc: Increase actor, representation, and depth model capacity.
+    rl:
+      hidden_dims: [768, 512, 256]
+      encoder_hidden_dims: [768, 512, 256]
+      latent_dim: 64
+      depth_feature_dim: 128
+      depth_gru_hidden_dim: 128
+      depth_channels: [32, 64, 64]
+
+  U7_all_big:
+    desc: Increase inputs and model capacity together.
+    env:
+      depth_camera_width: 32
+      depth_camera_height: 48
+      depth:
+        mode: buffer
+        buffer_size: 3
+        update_period: 2
+      terrain_scan:
+        x_back: 0.3
+        x_front: 1.2
+        y_half: 0.5
+        resolution: 0.1
+    rl:
+      hidden_dims: [768, 512, 256]
+      encoder_hidden_dims: [768, 512, 256]
+      latent_dim: 64
+      depth_feature_dim: 128
+      depth_gru_hidden_dim: 128
+      depth_channels: [32, 64, 64]

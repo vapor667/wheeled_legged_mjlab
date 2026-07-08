@@ -447,6 +447,7 @@ def test_representation_tests_are_not_git_ignored() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     paths = [
         "tests/test_representation_teacher_student_config.py",
+        "tests/test_experiment_overrides.py",
         "rsl_rl/tests/models/test_representation_actor_critic.py",
         "rsl_rl/tests/models/test_representation_velocity_actor_critic.py",
         "rsl_rl/tests/algorithms/test_representation_teacher_student_ppo.py",
