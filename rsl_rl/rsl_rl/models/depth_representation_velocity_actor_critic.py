@@ -43,6 +43,9 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         ame_map_resolution: float = 0.1,
         ame_map_x_range: tuple[float, float] | None = None,
         ame_map_y_range: tuple[float, float] | None = None,
+        ame_use_xyz_cnn_input: bool = True,
+        ame_cnn_downsample: bool = True,
+        ame_attach_global_context: bool = False,
         ame_return_attention_in_eval: bool = False,
     ) -> None:
         super().__init__(
@@ -63,6 +66,9 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             ame_map_resolution=ame_map_resolution,
             ame_map_x_range=ame_map_x_range,
             ame_map_y_range=ame_map_y_range,
+            ame_use_xyz_cnn_input=ame_use_xyz_cnn_input,
+            ame_cnn_downsample=ame_cnn_downsample,
+            ame_attach_global_context=ame_attach_global_context,
             ame_return_attention_in_eval=ame_return_attention_in_eval,
         )
         self.depth_obs_group, self.depth_shape = self._get_depth_group_and_shape(obs, obs_groups, "depth_encoder")

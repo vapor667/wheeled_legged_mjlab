@@ -60,6 +60,9 @@ class RepresentationVelocityActorCritic(nn.Module):
         ame_map_resolution: float = 0.1,
         ame_map_x_range: tuple[float, float] | None = None,
         ame_map_y_range: tuple[float, float] | None = None,
+        ame_use_xyz_cnn_input: bool = True,
+        ame_cnn_downsample: bool = True,
+        ame_attach_global_context: bool = False,
         ame_return_attention_in_eval: bool = False,
     ) -> None:
         super().__init__()
@@ -139,6 +142,9 @@ class RepresentationVelocityActorCritic(nn.Module):
                 map_resolution=ame_map_resolution,
                 map_x_range=ame_map_x_range,
                 map_y_range=ame_map_y_range,
+                use_xyz_cnn_input=ame_use_xyz_cnn_input,
+                cnn_downsample=ame_cnn_downsample,
+                attach_global_context=ame_attach_global_context,
             )
             if self.privileged_encoder.map_scan_dim != self.privileged_encoder_obs_dim:
                 raise ValueError(

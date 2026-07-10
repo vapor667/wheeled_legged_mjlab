@@ -196,6 +196,9 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     assert agent["actor"]["ame_map_resolution"] == TERRAIN_SCAN_RESOLUTION
     assert agent["actor"]["ame_d_model"] == 64
     assert agent["actor"]["ame_num_heads"] == 16
+    assert agent["actor"]["ame_use_xyz_cnn_input"] is True
+    assert agent["actor"]["ame_cnn_downsample"] is True
+    assert agent["actor"]["ame_attach_global_context"] is False
     assert agent["actor"]["ame_return_attention_in_eval"] is True
     assert agent["algorithm"]["representation_chunk_length"] == 12
     assert agent["obs_groups"] == {

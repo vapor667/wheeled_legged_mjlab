@@ -58,6 +58,9 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
     ame_map_resolution: float = 0.1
     ame_map_x_range: Tuple[float, float] | None = None
     ame_map_y_range: Tuple[float, float] | None = None
+    ame_use_xyz_cnn_input: bool = True
+    ame_cnn_downsample: bool = True
+    ame_attach_global_context: bool = False
     ame_return_attention_in_eval: bool = False
     class_name: str = "DepthRepresentationVelocityActorCritic"
 
@@ -185,6 +188,9 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             ame_num_heads=16,
             ame_use_layer_norm=False,
             ame_map_resolution=TERRAIN_SCAN_RESOLUTION,
+            ame_use_xyz_cnn_input=True,
+            ame_cnn_downsample=True,
+            ame_attach_global_context=False,
             ame_return_attention_in_eval=True,
             distribution_cfg={
                 "class_name": "GaussianDistribution",

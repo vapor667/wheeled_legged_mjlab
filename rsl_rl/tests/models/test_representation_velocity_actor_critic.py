@@ -26,6 +26,7 @@ NUM_ACTIONS = 2
 DEPTH_SHAPE = (1, 32, 24)
 AME_MAP_SHAPE = (5, 4)
 AME_MAP_DIM = AME_MAP_SHAPE[0] * AME_MAP_SHAPE[1] * 3
+AME_DOWNSAMPLED_TOKENS = ((AME_MAP_SHAPE[0] + 1) // 2) * ((AME_MAP_SHAPE[1] + 1) // 2)
 AME_MODEL_DIM = 8
 AME_NUM_HEADS = 2
 
@@ -148,6 +149,35 @@ def make_ame_depth_model(obs: TensorDict | None = None) -> DepthRepresentationVe
         ame_d_model=AME_MODEL_DIM,
         ame_num_heads=AME_NUM_HEADS,
         ame_return_attention_in_eval=True,
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
+def make_ame_global_depth_model(obs: TensorDict | None = None) -> DepthRepresentationVelocityActorCritic:
+    obs = make_ame_depth_rep_obs() if obs is None else obs
+    obs_groups = {
+        "proprio_history": ["proprio_history"],
+        "actor_command": ["actor_command"],
+        "lin_vel_target": ["lin_vel_target"],
+        "critic": ["critic"],
+        "privileged_encoder": ["privileged_encoder"],
+        "privileged_query": ["privileged_query"],
+        "depth_encoder": ["depth_camera"],
+    }
+    return DepthRepresentationVelocityActorCritic(
+        obs,
+        obs_groups,
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=LATENT_DIM,
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
+        ame_map_scan_shape=(*AME_MAP_SHAPE, 3),
+        ame_d_model=AME_MODEL_DIM,
+        ame_num_heads=AME_NUM_HEADS,
+        ame_attach_global_context=True,
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     )
 
@@ -308,6 +338,8 @@ def test_depth_ame_teacher_encoder_paths_have_expected_shapes() -> None:
 
     assert model.use_ame_teacher_encoder is True
     assert model.privileged_encoder.map_scan_shape == (*AME_MAP_SHAPE, 3)
+    assert model.privileged_encoder.use_xyz_cnn_input is True
+    assert model.privileged_encoder.cnn_downsample is True
     assert teacher_actions.shape == (NUM_ENVS, NUM_ACTIONS)
     assert values.shape == (NUM_ENVS, 1)
     assert privileged_latent.shape == (NUM_ENVS, LATENT_DIM)
@@ -340,8 +372,18 @@ def test_depth_ame_eval_path_caches_attention_weights() -> None:
         NUM_ENVS,
         AME_NUM_HEADS,
         1,
-        AME_MAP_SHAPE[0] * AME_MAP_SHAPE[1],
+        AME_DOWNSAMPLED_TOKENS,
     )
+
+
+def test_depth_ame_global_context_path_has_expected_shape() -> None:
+    obs = make_ame_depth_rep_obs()
+    model = make_ame_global_depth_model(obs)
+
+    privileged_latent = model.get_privileged_latent(obs)
+
+    assert model.privileged_encoder.attach_global_context is True
+    assert privileged_latent.shape == (NUM_ENVS, LATENT_DIM)
 
 
 def test_depth_student_hidden_state_persists_and_resets_per_environment() -> None:
