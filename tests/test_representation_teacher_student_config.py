@@ -23,6 +23,8 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_BUFFER_UPDATE_PERIOD,
     DEPTH_CAPTURE_FREQUENCY_HZ,
     DEPTH_CAMERA_NAME,
+    TERRAIN_MAP_SCAN_SHAPE,
+    TERRAIN_SCAN_RESOLUTION,
     wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_env_cfg,
     wf_tron1b_rough_env_cfg,
@@ -181,6 +183,8 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"))
     depth_group = cfg.observations[DEPTH_CAMERA_NAME]
     depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
+    privileged_terms = cfg.observations["privileged_encoder"].terms
+    privileged_query_terms = cfg.observations["privileged_query"].terms
 
     assert depth_term.func is mdp.async_depth_buffer
     assert depth_term.params == {
@@ -188,6 +192,11 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
     }
     assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
+    assert agent["actor"]["ame_map_scan_shape"] == TERRAIN_MAP_SCAN_SHAPE
+    assert agent["actor"]["ame_map_resolution"] == TERRAIN_SCAN_RESOLUTION
+    assert agent["actor"]["ame_d_model"] == 64
+    assert agent["actor"]["ame_num_heads"] == 16
+    assert agent["actor"]["ame_return_attention_in_eval"] is True
     assert agent["algorithm"]["representation_chunk_length"] == 12
     assert agent["obs_groups"] == {
         "proprio_history": ("proprio_history",),
@@ -195,7 +204,20 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "lin_vel_target": ("lin_vel_target",),
         "critic": ("critic",),
         "privileged_encoder": ("privileged_encoder",),
+        "privileged_query": ("privileged_query",),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
+    }
+    assert list(privileged_terms) == ["terrain_map_scan"]
+    assert privileged_terms["terrain_map_scan"].func is mdp.terrain_map_scan
+    assert "base_lin_vel" not in privileged_query_terms
+    assert set(privileged_query_terms) == {
+        "base_ang_vel",
+        "projected_gravity",
+        "joint_pos",
+        "joint_vel",
+        "wheel_vel",
+        "actions",
+        "command",
     }
 
 

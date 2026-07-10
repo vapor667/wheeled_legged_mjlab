@@ -351,6 +351,42 @@ def terrain_roughness_indicator(
   return gate.unsqueeze(-1)
 
 
+def terrain_map_scan(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  miss_value: float = 0.0,
+) -> torch.Tensor:
+  """Robot-centric xyz terrain scan from a raycast sensor.
+
+  The ray pattern supplies x/y in the yaw-aligned sensor frame; z is the hit
+  height relative to the sensor frame origin. The returned tensor is flattened
+  as [B, L * W * 3] for observation-manager concatenation.
+  """
+  sensor = env.scene[sensor_name]
+  assert isinstance(sensor, RayCastSensor), (
+    f"terrain_map_scan requires a RayCastSensor, got {type(sensor).__name__}"
+  )
+  data = sensor.data
+  offsets = sensor._local_offsets
+  assert offsets is not None
+
+  batch_size = data.distances.shape[0]
+  frame_count = sensor.num_frames
+  ray_count = sensor.num_rays_per_frame
+  xy = offsets[:, :2].view(1, 1, ray_count, 2).expand(
+    batch_size,
+    frame_count,
+    ray_count,
+    2,
+  )
+  frame_z = data.frame_pos_w[:, :, 2:3]
+  hit_z = data.hit_pos_w[..., 2].view(batch_size, frame_count, ray_count)
+  z = (hit_z - frame_z).unsqueeze(-1)
+  miss_mask = data.distances.view(batch_size, frame_count, ray_count, 1) < 0
+  z = torch.where(miss_mask, torch.full_like(z, miss_value), z)
+  return torch.cat((xy, z), dim=-1).reshape(batch_size, frame_count * ray_count * 3)
+
+
 def _normalize_to_unit_range(
   value: torch.Tensor, lower: float, upper: float
 ) -> torch.Tensor:

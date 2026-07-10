@@ -24,6 +24,10 @@ HISTORY_LENGTH = 5
 LATENT_DIM = 4
 NUM_ACTIONS = 2
 DEPTH_SHAPE = (1, 32, 24)
+AME_MAP_SHAPE = (5, 4)
+AME_MAP_DIM = AME_MAP_SHAPE[0] * AME_MAP_SHAPE[1] * 3
+AME_MODEL_DIM = 8
+AME_NUM_HEADS = 2
 
 
 def make_rep_obs(include_privileged: bool = True) -> TensorDict:
@@ -81,6 +85,20 @@ def make_depth_rep_obs(include_privileged: bool = True, include_depth: bool = Tr
     return TensorDict(data, batch_size=[NUM_ENVS])
 
 
+def make_ame_depth_rep_obs(include_privileged: bool = True, include_depth: bool = True) -> TensorDict:
+    obs = make_depth_rep_obs(include_privileged=False, include_depth=include_depth)
+    if include_privileged:
+        obs.update(
+            {
+                "lin_vel_target": torch.randn(NUM_ENVS, LIN_VEL_DIM),
+                "critic": torch.randn(NUM_ENVS, CRITIC_DIM),
+                "privileged_encoder": torch.randn(NUM_ENVS, AME_MAP_DIM),
+                "privileged_query": torch.randn(NUM_ENVS, PROPRIO_DIM + COMMAND_DIM),
+            }
+        )
+    return obs
+
+
 def make_depth_model(obs: TensorDict | None = None) -> DepthRepresentationVelocityActorCritic:
     obs = make_depth_rep_obs() if obs is None else obs
     obs_groups = {
@@ -101,6 +119,35 @@ def make_depth_model(obs: TensorDict | None = None) -> DepthRepresentationVeloci
         depth_feature_dim=8,
         depth_gru_hidden_dim=8,
         depth_channels=(4, 4),
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
+def make_ame_depth_model(obs: TensorDict | None = None) -> DepthRepresentationVelocityActorCritic:
+    obs = make_ame_depth_rep_obs() if obs is None else obs
+    obs_groups = {
+        "proprio_history": ["proprio_history"],
+        "actor_command": ["actor_command"],
+        "lin_vel_target": ["lin_vel_target"],
+        "critic": ["critic"],
+        "privileged_encoder": ["privileged_encoder"],
+        "privileged_query": ["privileged_query"],
+        "depth_encoder": ["depth_camera"],
+    }
+    return DepthRepresentationVelocityActorCritic(
+        obs,
+        obs_groups,
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=LATENT_DIM,
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
+        ame_map_scan_shape=(*AME_MAP_SHAPE, 3),
+        ame_d_model=AME_MODEL_DIM,
+        ame_num_heads=AME_NUM_HEADS,
+        ame_return_attention_in_eval=True,
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     )
 
@@ -250,6 +297,53 @@ def test_depth_teacher_student_value_and_velocity_paths_have_expected_shapes() -
     assert predicted_lin_vel.shape == (NUM_ENVS, LIN_VEL_DIM)
 
 
+def test_depth_ame_teacher_encoder_paths_have_expected_shapes() -> None:
+    obs = make_ame_depth_rep_obs()
+    model = make_ame_depth_model(obs)
+
+    teacher_actions = model.act_teacher(obs, stochastic_output=True)
+    values = model.evaluate_teacher(obs)
+    privileged_latent = model.get_privileged_latent(obs)
+    query_obs = model.get_privileged_query_obs(obs)
+
+    assert model.use_ame_teacher_encoder is True
+    assert model.privileged_encoder.map_scan_shape == (*AME_MAP_SHAPE, 3)
+    assert teacher_actions.shape == (NUM_ENVS, NUM_ACTIONS)
+    assert values.shape == (NUM_ENVS, 1)
+    assert privileged_latent.shape == (NUM_ENVS, LATENT_DIM)
+    assert query_obs.shape == (NUM_ENVS, PROPRIO_DIM + COMMAND_DIM)
+
+
+def test_depth_ame_teacher_query_uses_clean_privileged_query_group() -> None:
+    obs = make_ame_depth_rep_obs()
+    model = make_ame_depth_model(obs)
+
+    query_obs = model.get_privileged_query_obs(obs)
+
+    assert torch.equal(query_obs, obs["privileged_query"])
+
+
+def test_depth_ame_eval_path_caches_attention_weights() -> None:
+    obs = make_ame_depth_rep_obs()
+    model = make_ame_depth_model(obs)
+
+    model.train()
+    model.get_privileged_latent(obs)
+    assert model.privileged_encoder.last_attention_weights is None
+
+    model.eval()
+    model.get_privileged_latent(obs)
+
+    attention_weights = model.privileged_encoder.last_attention_weights
+    assert attention_weights is not None
+    assert attention_weights.shape == (
+        NUM_ENVS,
+        AME_NUM_HEADS,
+        1,
+        AME_MAP_SHAPE[0] * AME_MAP_SHAPE[1],
+    )
+
+
 def test_depth_student_hidden_state_persists_and_resets_per_environment() -> None:
     obs = make_depth_rep_obs()
     model = make_depth_model(obs)
@@ -286,6 +380,33 @@ def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
     assert all(param.grad is None for param in model.privileged_encoder.parameters())
 
 
+def test_depth_ame_student_losses_detach_teacher_encoder_side() -> None:
+    obs = make_ame_depth_rep_obs()
+    model = make_ame_depth_model(obs)
+
+    student_loss, representation_loss, lin_vel_loss = model.compute_student_losses(obs)
+    model.zero_grad()
+    student_loss.backward()
+
+    assert torch.allclose(student_loss, representation_loss + lin_vel_loss)
+    assert any(param.grad is not None for param in model.depth_encoder.parameters())
+    assert any(param.grad is not None for param in model.depth_gru.parameters())
+    assert any(param.grad is not None for param in model.proprio_encoder.parameters())
+    assert all(param.grad is None for param in model.privileged_encoder.parameters())
+
+
+def test_depth_ame_critic_does_not_update_teacher_encoder_side() -> None:
+    obs = make_ame_depth_rep_obs()
+    model = make_ame_depth_model(obs)
+
+    value_loss = model.evaluate_teacher(obs).pow(2).mean()
+    model.zero_grad()
+    value_loss.backward()
+
+    assert any(param.grad is not None for param in model.critic_head.parameters())
+    assert all(param.grad is None for param in model.privileged_encoder.parameters())
+
+
 def test_depth_sequence_student_losses_use_continuous_depth_state() -> None:
     model = make_depth_model()
     time_steps = 3
@@ -299,6 +420,35 @@ def test_depth_sequence_student_losses_use_continuous_depth_state() -> None:
     )
     dones = torch.zeros(time_steps, NUM_ENVS, 1)
     dones[1, 0] = 1.0
+    hidden_state = torch.zeros(NUM_ENVS, model.depth_gru_hidden_dim)
+
+    model.zero_grad()
+    student_loss, representation_loss, lin_vel_loss = model.compute_student_losses_sequence(
+        obs,
+        dones,
+        hidden_state,
+    )
+    student_loss.backward()
+
+    assert torch.allclose(student_loss, representation_loss + lin_vel_loss)
+    assert any(param.grad is not None for param in model.depth_gru.parameters())
+    assert all(param.grad is None for param in model.actor_head.parameters())
+    assert all(param.grad is None for param in model.critic_head.parameters())
+    assert all(param.grad is None for param in model.privileged_encoder.parameters())
+
+
+def test_depth_ame_sequence_student_losses_use_attention_teacher_target() -> None:
+    model = make_ame_depth_model()
+    time_steps = 3
+    step_observations = [make_ame_depth_rep_obs() for _ in range(time_steps)]
+    obs = TensorDict(
+        {
+            key: torch.stack([step_obs[key] for step_obs in step_observations])
+            for key in step_observations[0].keys()
+        },
+        batch_size=[time_steps, NUM_ENVS],
+    )
+    dones = torch.zeros(time_steps, NUM_ENVS, 1)
     hidden_state = torch.zeros(NUM_ENVS, model.depth_gru_hidden_dim)
 
     model.zero_grad()

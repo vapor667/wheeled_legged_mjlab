@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
+from dataclasses import dataclass
+
+import torch
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg, JointVelocityActionCfg
@@ -46,6 +49,31 @@ from wheeled_legged_mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 
 from .terrain_cfg import PLANE_ENTITY_CFG, TERRAINS_ENTITY_CFG
 
+
+@dataclass
+class ForwardGridPatternCfg:
+    """Yaw-aligned grid pattern with an explicit forward-biased local range."""
+
+    x_range: tuple[float, float]
+    y_range: tuple[float, float]
+    resolution: float
+    direction: tuple[float, float, float] = (0.0, 0.0, -1.0)
+
+    def generate_rays(self, mj_model, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+        del mj_model
+        num_x = round((self.x_range[1] - self.x_range[0]) / self.resolution) + 1
+        num_y = round((self.y_range[1] - self.y_range[0]) / self.resolution) + 1
+        x = torch.linspace(*self.x_range, num_x, device=device, dtype=torch.float32)
+        y = torch.linspace(*self.y_range, num_y, device=device, dtype=torch.float32)
+        grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
+        local_offsets = torch.zeros((grid_x.numel(), 3), device=device, dtype=torch.float32)
+        local_offsets[:, 0] = grid_x.flatten()
+        local_offsets[:, 1] = grid_y.flatten()
+        direction = torch.tensor(self.direction, device=device, dtype=torch.float32)
+        local_directions = (direction / direction.norm()).unsqueeze(0).expand(grid_x.numel(), 3).clone()
+        return local_offsets, local_directions
+
+
 ROBOT_ENTITY = "robot"
 COMMAND_NAME = "twist"
 
@@ -76,7 +104,14 @@ WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
-TERRAIN_SCAN_GRID_SHAPE = (11, 11)
+TERRAIN_SCAN_RESOLUTION = 0.10
+TERRAIN_SCAN_X_RANGE = (-0.3, 1.5)
+TERRAIN_SCAN_Y_RANGE = (-0.5, 0.5)
+TERRAIN_SCAN_GRID_SHAPE = (
+    round((TERRAIN_SCAN_X_RANGE[1] - TERRAIN_SCAN_X_RANGE[0]) / TERRAIN_SCAN_RESOLUTION) + 1,
+    round((TERRAIN_SCAN_Y_RANGE[1] - TERRAIN_SCAN_Y_RANGE[0]) / TERRAIN_SCAN_RESOLUTION) + 1,
+)
+TERRAIN_MAP_SCAN_SHAPE = (*TERRAIN_SCAN_GRID_SHAPE, 3)
 DEPTH_CAMERA_NAME = "depth_camera"
 DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/d435"
 DEPTH_CAMERA_WIDTH = 24
@@ -131,7 +166,11 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
                 name="terrain_scan",
                 frame=ObjRef(type="body", name=BASE_BODY, entity=ROBOT_ENTITY),
                 ray_alignment="yaw",
-                pattern=GridPatternCfg(size=(1.0, 1.0), resolution=0.1),
+                pattern=ForwardGridPatternCfg(
+                    x_range=TERRAIN_SCAN_X_RANGE,
+                    y_range=TERRAIN_SCAN_Y_RANGE,
+                    resolution=TERRAIN_SCAN_RESOLUTION,
+                ),
                 max_distance=10.0,
                 exclude_parent_body=True,
                 include_geom_groups=(0,),
@@ -214,6 +253,7 @@ def make_observations(
     depth: bool = False,
     lin_vel_representation: bool = False,
     async_depth: bool = False,
+    ame_privileged_map: bool = False,
 ) -> dict[str, ObservationGroupCfg]:
     """Student history uses noisy proprioception; teacher and critic stay clean."""
     actor_terms = {
@@ -344,6 +384,28 @@ def make_observations(
     if lin_vel_representation:
         privileged_encoder_terms = deepcopy(critic_terms)
         privileged_encoder_terms.pop("base_lin_vel", None)
+        privileged_query_terms = None
+        if ame_privileged_map:
+            if "height_scan" not in critic_terms:
+                raise ValueError("AME privileged map requires rough terrain height_scan observations.")
+            privileged_encoder_terms = {
+                "terrain_map_scan": ObservationTermCfg(
+                    func=mdp.terrain_map_scan,
+                    params={"sensor_name": "terrain_scan"},
+                )
+            }
+            privileged_query_terms = {
+                name: deepcopy(critic_terms[name])
+                for name in (
+                    "base_ang_vel",
+                    "projected_gravity",
+                    "joint_pos",
+                    "joint_vel",
+                    "wheel_vel",
+                    "actions",
+                    "command",
+                )
+            }
         observations = {
             "proprio_history": ObservationGroupCfg(
                 terms=dict(proprio_terms),
@@ -373,6 +435,12 @@ def make_observations(
                 enable_corruption=False,
             ),
         }
+        if privileged_query_terms is not None:
+            observations["privileged_query"] = ObservationGroupCfg(
+                terms=privileged_query_terms,
+                concatenate_terms=True,
+                enable_corruption=False,
+            )
     else:
         observations = {
             "actor": ObservationGroupCfg(
@@ -929,6 +997,7 @@ def make_env_cfg(
     depth: bool = False,
     lin_vel_representation: bool = False,
     async_depth: bool = False,
+    ame_privileged_map: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
@@ -937,6 +1006,7 @@ def make_env_cfg(
             depth=depth,
             lin_vel_representation=lin_vel_representation,
             async_depth=async_depth,
+            ame_privileged_map=ame_privileged_map,
         ),
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
@@ -1028,6 +1098,7 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerB
         depth=True,
         lin_vel_representation=True,
         async_depth=True,
+        ame_privileged_map=True,
     )
 
 

@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tensordict import TensorDict
 
-from rsl_rl.modules import MLP, EmpiricalNormalization, HiddenState
+from rsl_rl.modules import AttentionMapEncoder, MLP, EmpiricalNormalization, HiddenState
 from rsl_rl.modules.distribution import Distribution
 from rsl_rl.utils import resolve_callable, unpad_trajectories
 
@@ -53,6 +53,14 @@ class RepresentationVelocityActorCritic(nn.Module):
         obs_normalization: bool = False,
         normalize_latent: bool = True,
         distribution_cfg: dict | None = None,
+        ame_map_scan_shape: tuple[int, int] | tuple[int, int, int] | None = None,
+        ame_d_model: int = 64,
+        ame_num_heads: int = 16,
+        ame_use_layer_norm: bool = False,
+        ame_map_resolution: float = 0.1,
+        ame_map_x_range: tuple[float, float] | None = None,
+        ame_map_y_range: tuple[float, float] | None = None,
+        ame_return_attention_in_eval: bool = False,
     ) -> None:
         super().__init__()
         (
@@ -104,12 +112,48 @@ class RepresentationVelocityActorCritic(nn.Module):
 
         encoder_hidden_dims = hidden_dims if encoder_hidden_dims is None else encoder_hidden_dims
         encoder_feature_dim = self._encoder_feature_dim(encoder_hidden_dims)
-        self.privileged_encoder = MLP(self.privileged_encoder_obs_dim, latent_dim, encoder_hidden_dims, activation)
+        self.use_ame_teacher_encoder = ame_map_scan_shape is not None
+        self.ame_return_attention_in_eval = ame_return_attention_in_eval
+        if self.use_ame_teacher_encoder and "privileged_query" in obs_groups:
+            self.privileged_query_obs_groups, self.privileged_query_obs_dim = self._get_obs_dim(
+                obs,
+                obs_groups,
+                "privileged_query",
+            )
+        else:
+            self.privileged_query_obs_groups = None
+            self.privileged_query_obs_dim = self.current_proprio_dim + self.command_dim
+        if obs_normalization and self.privileged_query_obs_groups is not None:
+            self.privileged_query_obs_normalizer = EmpiricalNormalization(self.privileged_query_obs_dim)
+        else:
+            self.privileged_query_obs_normalizer = nn.Identity()
+        if self.use_ame_teacher_encoder:
+            self.privileged_encoder = AttentionMapEncoder(
+                ame_map_scan_shape,
+                proprio_dim=self.privileged_query_obs_dim,
+                output_dim=latent_dim,
+                d_model=ame_d_model,
+                num_heads=ame_num_heads,
+                activation=activation,
+                use_layer_norm=ame_use_layer_norm,
+                map_resolution=ame_map_resolution,
+                map_x_range=ame_map_x_range,
+                map_y_range=ame_map_y_range,
+            )
+            if self.privileged_encoder.map_scan_dim != self.privileged_encoder_obs_dim:
+                raise ValueError(
+                    "AME privileged_encoder observation dimension must match ame_map_scan_shape, "
+                    f"got obs dim {self.privileged_encoder_obs_dim} and map dim "
+                    f"{self.privileged_encoder.map_scan_dim}."
+                )
+        else:
+            self.privileged_encoder = MLP(self.privileged_encoder_obs_dim, latent_dim, encoder_hidden_dims, activation)
         self.proprio_encoder = MLP(self.proprio_encoder_obs_dim, encoder_feature_dim, encoder_hidden_dims, activation)
         self.student_latent_head = nn.Linear(encoder_feature_dim, latent_dim)
         self.lin_vel_head = nn.Linear(encoder_feature_dim, self.lin_vel_dim)
         self.actor_head = MLP(self.actor_obs_dim + latent_dim, actor_output_dim, hidden_dims, activation)
-        self.critic_head = MLP(self.critic_obs_dim + latent_dim, 1, hidden_dims, activation)
+        critic_input_dim = self.critic_obs_dim if self.use_ame_teacher_encoder else self.critic_obs_dim + latent_dim
+        self.critic_head = MLP(critic_input_dim, 1, hidden_dims, activation)
 
         if self.distribution is not None:
             self.distribution.init_mlp_weights(self.actor_head)
@@ -154,6 +198,8 @@ class RepresentationVelocityActorCritic(nn.Module):
         del hidden_state
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
         critic_obs = self.get_critic_obs(obs)
+        if self.use_ame_teacher_encoder:
+            return self.critic_head(critic_obs)
         latent = self.get_privileged_latent(obs)
         return self.critic_head(torch.cat((critic_obs, latent), dim=-1))
 
@@ -202,7 +248,7 @@ class RepresentationVelocityActorCritic(nn.Module):
 
     def get_current_proprio(self, obs: TensorDict) -> torch.Tensor:
         proprio_history = self._cat_obs(obs, self.proprio_history_obs_groups)
-        return proprio_history[:, -1, :]
+        return proprio_history[..., -1, :]
 
     def get_command(self, obs: TensorDict) -> torch.Tensor:
         return self._cat_obs(obs, self.command_obs_groups)
@@ -221,6 +267,23 @@ class RepresentationVelocityActorCritic(nn.Module):
     def get_privileged_obs(self, obs: TensorDict) -> torch.Tensor:
         return self.privileged_obs_normalizer(self._cat_obs(obs, self.privileged_encoder_obs_groups))
 
+    def get_privileged_query_obs(self, obs: TensorDict) -> torch.Tensor:
+        if self.privileged_query_obs_groups is not None:
+            return self.privileged_query_obs_normalizer(self._cat_obs(obs, self.privileged_query_obs_groups))
+        current_proprio = self.get_current_proprio(obs)
+        command = self.get_command(obs)
+        leading_shape = current_proprio.shape[:-1]
+        current_proprio = current_proprio.reshape(-1, self.current_proprio_dim)
+        command = command.reshape(-1, self.command_dim)
+        query = torch.cat(
+            (
+                self.current_proprio_obs_normalizer(current_proprio),
+                self.command_obs_normalizer(command),
+            ),
+            dim=-1,
+        )
+        return query.reshape(*leading_shape, self.current_proprio_dim + self.command_dim)
+
     def get_proprio_outputs(self, obs: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
         features = self.proprio_encoder(self.get_proprio_obs(obs))
         latent = self.student_latent_head(features)
@@ -234,7 +297,14 @@ class RepresentationVelocityActorCritic(nn.Module):
         return self.get_proprio_outputs(obs)[1]
 
     def get_privileged_latent(self, obs: TensorDict) -> torch.Tensor:
-        latent = self.privileged_encoder(self.get_privileged_obs(obs))
+        if self.use_ame_teacher_encoder:
+            latent = self.privileged_encoder(
+                self._cat_obs(obs, self.privileged_encoder_obs_groups),
+                self.get_privileged_query_obs(obs),
+                return_attention=self.ame_return_attention_in_eval and not self.training,
+            )
+        else:
+            latent = self.privileged_encoder(self.get_privileged_obs(obs))
         return self._normalize_latent(latent)
 
     def reset(self, dones: torch.Tensor | None = None, hidden_state: HiddenState = None) -> None:
@@ -285,6 +355,10 @@ class RepresentationVelocityActorCritic(nn.Module):
             self.lin_vel_normalizer.update(self.get_lin_vel_target(obs))  # type: ignore
             self.critic_obs_normalizer.update(self._cat_obs(obs, self.critic_obs_groups))  # type: ignore
             self.privileged_obs_normalizer.update(self._cat_obs(obs, self.privileged_encoder_obs_groups))  # type: ignore
+            if self.privileged_query_obs_groups is not None:
+                self.privileged_query_obs_normalizer.update(  # type: ignore
+                    self._cat_obs(obs, self.privileged_query_obs_groups)
+                )
 
     def _actor(self, actor_obs: torch.Tensor, latent: torch.Tensor, stochastic_output: bool) -> torch.Tensor:
         mlp_output = self.actor_head(torch.cat((actor_obs, latent), dim=-1))

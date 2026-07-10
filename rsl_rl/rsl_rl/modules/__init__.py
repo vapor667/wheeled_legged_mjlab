@@ -8,10 +8,12 @@
 from .cnn import CNN
 from .distribution import BetaDistribution, Distribution, GaussianDistribution, HeteroscedasticGaussianDistribution
 from .mlp import MLP
+from .ame_encoder import AttentionMapEncoder
 from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
 from .rnn import RNN, HiddenState
 
 __all__ = [
+    "AttentionMapEncoder",
     "CNN",
     "MLP",
     "RNN",

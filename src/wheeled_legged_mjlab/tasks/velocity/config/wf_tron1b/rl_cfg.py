@@ -9,6 +9,8 @@ from mjlab.rl import (
     RslRlPpoAlgorithmCfg,
 )
 
+from .env_cfgs import TERRAIN_MAP_SCAN_SHAPE, TERRAIN_SCAN_RESOLUTION
+
 class WFTRON1BRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     trial_message: str = ""
 
@@ -49,6 +51,14 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
     depth_feature_dim: int = 64
     depth_gru_hidden_dim: int = 64
     depth_channels: Tuple[int, ...] = (16, 32, 32)
+    ame_map_scan_shape: Tuple[int, ...] | None = None
+    ame_d_model: int = 64
+    ame_num_heads: int = 16
+    ame_use_layer_norm: bool = False
+    ame_map_resolution: float = 0.1
+    ame_map_x_range: Tuple[float, float] | None = None
+    ame_map_y_range: Tuple[float, float] | None = None
+    ame_return_attention_in_eval: bool = False
     class_name: str = "DepthRepresentationVelocityActorCritic"
 
 
@@ -170,6 +180,12 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             depth_feature_dim=64,
             depth_gru_hidden_dim=64,
             depth_channels=(16, 32, 32),
+            ame_map_scan_shape=TERRAIN_MAP_SCAN_SHAPE,
+            ame_d_model=64,
+            ame_num_heads=16,
+            ame_use_layer_norm=False,
+            ame_map_resolution=TERRAIN_SCAN_RESOLUTION,
+            ame_return_attention_in_eval=True,
             distribution_cfg={
                 "class_name": "GaussianDistribution",
                 "init_std": 1.0,
@@ -203,6 +219,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             "lin_vel_target": ("lin_vel_target",),
             "critic": ("critic",),
             "privileged_encoder": ("privileged_encoder",),
+            "privileged_query": ("privileged_query",),
             "depth_encoder": ("depth_camera",),
         },
         experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_depth_latent64",

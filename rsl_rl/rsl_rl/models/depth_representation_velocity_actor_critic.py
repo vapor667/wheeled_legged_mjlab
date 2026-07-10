@@ -36,6 +36,14 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         depth_feature_dim: int = 64,
         depth_gru_hidden_dim: int = 64,
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
+        ame_map_scan_shape: tuple[int, int] | tuple[int, int, int] | None = None,
+        ame_d_model: int = 64,
+        ame_num_heads: int = 16,
+        ame_use_layer_norm: bool = False,
+        ame_map_resolution: float = 0.1,
+        ame_map_x_range: tuple[float, float] | None = None,
+        ame_map_y_range: tuple[float, float] | None = None,
+        ame_return_attention_in_eval: bool = False,
     ) -> None:
         super().__init__(
             obs,
@@ -48,6 +56,14 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             obs_normalization=obs_normalization,
             normalize_latent=normalize_latent,
             distribution_cfg=distribution_cfg,
+            ame_map_scan_shape=ame_map_scan_shape,
+            ame_d_model=ame_d_model,
+            ame_num_heads=ame_num_heads,
+            ame_use_layer_norm=ame_use_layer_norm,
+            ame_map_resolution=ame_map_resolution,
+            ame_map_x_range=ame_map_x_range,
+            ame_map_y_range=ame_map_y_range,
+            ame_return_attention_in_eval=ame_return_attention_in_eval,
         )
         self.depth_obs_group, self.depth_shape = self._get_depth_group_and_shape(obs, obs_groups, "depth_encoder")
         self.depth_feature_dim = depth_feature_dim
@@ -143,13 +159,8 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         predicted_lin_vel = self.lin_vel_head(features).view(time_steps, batch_size, self.lin_vel_dim)
         latent = self._normalize_latent(latent)
 
-        privileged_obs = self.privileged_obs_normalizer(
-            self._cat_obs(obs, self.privileged_encoder_obs_groups)
-        )
         with torch.no_grad():
-            privileged_latent = self._normalize_latent(
-                self.privileged_encoder(privileged_obs.flatten(0, 1))
-            ).view(time_steps, batch_size, self.latent_dim)
+            privileged_latent = self.get_privileged_latent(obs)
         representation_loss = F.mse_loss(latent, privileged_latent)
         lin_vel_loss = F.mse_loss(predicted_lin_vel, self.get_lin_vel_target(obs))
         return representation_loss + lin_vel_loss, representation_loss, lin_vel_loss
