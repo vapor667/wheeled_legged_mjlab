@@ -17,7 +17,7 @@ variants:
     desc: Feed an explicit 3-frame depth buffer.
     env:
       depth:
-        mode: buffer
+        mode: buffer                
         buffer_size: 3
         update_period: 2
 
@@ -56,8 +56,6 @@ variants:
   U6_big_model:
     desc: Increase actor, representation, and depth model capacity.
     rl:
-      hidden_dims: [768, 512, 256]
-      encoder_hidden_dims: [768, 512, 256]
       latent_dim: 64
       depth_feature_dim: 128
       depth_gru_hidden_dim: 128
@@ -78,8 +76,6 @@ variants:
         y_half: 0.5
         resolution: 0.1
     rl:
-      hidden_dims: [768, 512, 256]
-      encoder_hidden_dims: [768, 512, 256]
       latent_dim: 64
       depth_feature_dim: 128
       depth_gru_hidden_dim: 128

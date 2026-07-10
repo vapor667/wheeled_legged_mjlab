@@ -1,0 +1,109 @@
+name: capacity_probe_v2
+base_task: Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth
+max_iterations: 8000
+seeds: [0, 1]
+
+variants:
+  B0_baseline:
+    desc: Unmodified reference configuration.
+
+  R1_depth_32x48:
+    desc: Higher-resolution reference for the accuracy-latency trade-off.
+    env:
+      depth_camera_width: 32
+      depth_camera_height: 48
+
+  I2_front_height_scan:
+    desc: Test the longer privileged terrain scan in isolation.
+    env:
+      terrain_scan:
+        x_back: 0.5
+        x_front: 1.0
+        y_half: 0.5
+        resolution: 0.1
+
+  I3_depth_and_scan:
+    desc: Test the interaction between depth resolution and forward terrain context.
+    env:
+      depth_camera_width: 32
+      depth_camera_height: 48
+      terrain_scan:
+        x_back: 0.5
+        x_front: 1.0
+        y_half: 0.5
+        resolution: 0.1
+
+  I4_depth_scan_history:
+    desc: Measure the incremental value of explicit depth history over I3.
+    env:
+      depth_camera_width: 32
+      depth_camera_height: 48
+      depth:
+        mode: buffer
+        buffer_size: 3
+        update_period: 2
+      terrain_scan:
+        x_back: 0.5
+        x_front: 1.0
+        y_half: 0.5
+        resolution: 0.1
+
+  R2_depth_16x24:
+    desc: Lower-resolution depth with a two-layer small-channel CNN.
+    env:
+      depth_camera_width: 16
+      depth_camera_height: 24
+    rl:
+      depth_channels: [8, 16]
+
+  R3_depth_16x9:
+    desc: Minimum depth-resolution candidate with a two-layer small-channel CNN.
+    env:
+      depth_camera_width: 16
+      depth_camera_height: 9
+    rl:
+      depth_channels: [8, 16]
+
+  C1_compact_24x32:
+    desc: Compact model at the baseline depth resolution.
+    rl:
+      hidden_dims: [256, 128, 64]
+      encoder_hidden_dims: [256, 128, 64]
+      latent_dim: 16
+      depth_feature_dim: 32
+      depth_gru_hidden_dim: 32
+      depth_channels: [8, 16]
+
+  C2_compact_16x24:
+    desc: Compact model at the practical lower depth resolution.
+    env:
+      depth_camera_width: 16
+      depth_camera_height: 24
+    rl:
+      hidden_dims: [256, 128, 64]
+      encoder_hidden_dims: [256, 128, 64]
+      latent_dim: 16
+      depth_feature_dim: 32
+      depth_gru_hidden_dim: 32
+      depth_channels: [8, 16]
+
+  C3_compact_16x9:
+    desc: Minimum-resolution compact model for the deployment lower bound.
+    env:
+      depth_camera_width: 16
+      depth_camera_height: 9
+    rl:
+      hidden_dims: [256, 128, 64]
+      encoder_hidden_dims: [256, 128, 64]
+      latent_dim: 16
+      depth_feature_dim: 32
+      depth_gru_hidden_dim: 32
+      depth_channels: [8, 16]
+
+  C4_small_depth_repr:
+    desc: Isolate smaller latent, depth feature, and GRU dimensions with baseline MLP widths.
+    rl:
+      latent_dim: 16
+      depth_feature_dim: 32
+      depth_gru_hidden_dim: 32
+      depth_channels: [8, 16]
