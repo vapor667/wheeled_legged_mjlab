@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from mjlab.envs import ManagerBasedRlEnv
 
 from wheeled_legged_mjlab.tasks.velocity.utils.visualizations import (
+  draw_attention_weights,
   draw_predicted_lin_vel,
   draw_roughness_gate_marker,
 )
@@ -18,5 +19,6 @@ class WheeledLeggedVelocityEnv(ManagerBasedRlEnv):
 
   def update_visualizers(self, visualizer: DebugVisualizer) -> None:
     super().update_visualizers(visualizer)
+    draw_attention_weights(self, visualizer)
     draw_predicted_lin_vel(self, visualizer)
     draw_roughness_gate_marker(self, visualizer)

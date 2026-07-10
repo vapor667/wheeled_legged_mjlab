@@ -88,6 +88,10 @@ class AttentionMapEncoder(nn.Module):
         self.mha = nn.MultiheadAttention(embed_dim=d_model, num_heads=num_heads, batch_first=True)
         self.latent_proj = nn.Identity() if encoder_feature_dim == output_dim else nn.Linear(encoder_feature_dim, output_dim)
         self.last_attention_weights: torch.Tensor | None = None
+        # The point sequence presented to the attention layer.  Keep this alongside
+        # the weights so play-time viewers can render each weight at its true scan
+        # location, including the CNN downsampling layout.
+        self.last_attention_points: torch.Tensor | None = None
 
         self.use_layer_norm = use_layer_norm
         if use_layer_norm:
@@ -147,12 +151,13 @@ class AttentionMapEncoder(nn.Module):
         features = self.activation(self.conv1(cnn_input))
         features = self.activation(self.conv2(features))
         features = features.permute(0, 2, 3, 1).flatten(start_dim=1, end_dim=2)
+        attention_xyz = xyz[:, ::2, ::2, :] if self.cnn_downsample else xyz
         if self.use_xyz_cnn_input:
             point_features = features
         else:
-            if self.cnn_downsample:
-                xyz = xyz[:, ::2, ::2, :]
-            point_features = torch.cat((features, xyz.reshape(batch_size, features.shape[1], 3)), dim=-1)
+            point_features = torch.cat(
+                (features, attention_xyz.reshape(batch_size, features.shape[1], 3)), dim=-1
+            )
         point_features = self.point_ln(point_features)
 
         query = self.proprio_proj(proprio)
@@ -174,8 +179,10 @@ class AttentionMapEncoder(nn.Module):
         if return_attention:
             assert attention_weights is not None
             self.last_attention_weights = attention_weights.detach()
+            self.last_attention_points = attention_xyz.reshape(batch_size, -1, 3).detach()
         else:
             self.last_attention_weights = None
+            self.last_attention_points = None
         z_map = z_map.squeeze(1)
         if global_features_max is not None:
             z_map = torch.cat((global_features_max, z_map), dim=-1)

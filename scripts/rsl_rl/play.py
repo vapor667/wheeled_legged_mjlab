@@ -58,6 +58,69 @@ class PlayConfig:
   _demo_mode: tyro.conf.Suppress[bool] = False
 
 
+_LEGACY_AME_TERRAIN_SCAN_X_RANGE = (-0.3, 1.5)
+_LEGACY_AME_TERRAIN_SCAN_Y_RANGE = (-0.5, 0.5)
+_LEGACY_AME_TERRAIN_SCAN_RESOLUTION = 0.1
+_LEGACY_AME_TERRAIN_SCAN_GRID_SHAPE = (19, 11)
+_LEGACY_AME_MAP_SCAN_SHAPE = (*_LEGACY_AME_TERRAIN_SCAN_GRID_SHAPE, 3)
+_LEGACY_AME_CONV1_WEIGHT_SHAPE = (16, 1, 5, 5)
+
+
+def _is_legacy_ame_checkpoint(checkpoint_path: Path) -> bool:
+  """Recognize checkpoints produced before the AME encoder optimization."""
+  checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+  actor_state = checkpoint.get("actor_state_dict", {})
+  conv1_weight = actor_state.get("privileged_encoder.conv1.weight")
+  return (
+    isinstance(conv1_weight, torch.Tensor)
+    and tuple(conv1_weight.shape) == _LEGACY_AME_CONV1_WEIGHT_SHAPE
+  )
+
+
+def _apply_legacy_ame_play_compat(env_cfg, agent_cfg) -> None:
+  """Restore the pre-a500b38 AME input layout for a legacy checkpoint."""
+  terrain_scan_cfg = next(
+    (sensor for sensor in env_cfg.scene.sensors if sensor.name == "terrain_scan"),
+    None,
+  )
+  if terrain_scan_cfg is None or terrain_scan_cfg.pattern is None:
+    raise ValueError("Legacy AME checkpoint requires the rough-terrain scan sensor.")
+
+  terrain_scan_cfg.pattern.x_range = _LEGACY_AME_TERRAIN_SCAN_X_RANGE
+  terrain_scan_cfg.pattern.y_range = _LEGACY_AME_TERRAIN_SCAN_Y_RANGE
+  terrain_scan_cfg.pattern.resolution = _LEGACY_AME_TERRAIN_SCAN_RESOLUTION
+
+  # The current config stores the terrain scan grid shape in observation and
+  # roughness-reward term parameters.  Keep those derived values in sync with
+  # the restored ray pattern before managers are constructed.
+  for observation_group in env_cfg.observations.values():
+    for term_cfg in observation_group.terms.values():
+      params = term_cfg.params
+      if (
+        params is not None
+        and params.get("sensor_name") == "terrain_scan"
+        and "grid_shape" in params
+      ):
+        params["grid_shape"] = _LEGACY_AME_TERRAIN_SCAN_GRID_SHAPE
+  for reward_cfg in env_cfg.rewards.values():
+    params = reward_cfg.params
+    if (
+      params is not None
+      and params.get("roughness_sensor_name") == "terrain_scan"
+      and "grid_shape" in params
+    ):
+      params["grid_shape"] = _LEGACY_AME_TERRAIN_SCAN_GRID_SHAPE
+
+  actor_cfg = agent_cfg.actor
+  actor_cfg.ame_map_scan_shape = _LEGACY_AME_MAP_SCAN_SHAPE
+  actor_cfg.ame_map_resolution = _LEGACY_AME_TERRAIN_SCAN_RESOLUTION
+  actor_cfg.ame_map_x_range = _LEGACY_AME_TERRAIN_SCAN_X_RANGE
+  actor_cfg.ame_map_y_range = _LEGACY_AME_TERRAIN_SCAN_Y_RANGE
+  actor_cfg.ame_use_xyz_cnn_input = False
+  actor_cfg.ame_cnn_downsample = False
+  actor_cfg.ame_attach_global_context = False
+
+
 def _select_play_policy(policy, policy_role: Literal["student", "teacher"]):
   if policy_role == "student":
     return policy
@@ -81,6 +144,51 @@ def _select_play_policy(policy, policy_role: Literal["student", "teacher"]):
       return None
 
   return TeacherPolicy(policy)
+
+
+class _TeacherAttentionVisualizationPolicy:
+  """Expose a teacher AME encoder's latest attention state to the environment."""
+
+  def __init__(self, policy, env):
+    self.policy = policy
+    self.env = env
+    self.model = policy.model
+
+    # Teacher play is the only supported attention-visualization mode.  This
+    # makes the MHA return its per-head weights even for checkpoints whose saved
+    # runner config did not enable the optional evaluation cache.
+    self.model.ame_return_attention_in_eval = True
+
+  def __getattr__(self, name: str):
+    return getattr(self.policy, name)
+
+  def __call__(self, obs) -> torch.Tensor:
+    actions = self.policy(obs)
+    encoder = self.model.privileged_encoder
+    weights = encoder.last_attention_weights
+    points = encoder.last_attention_points
+    if weights is not None and points is not None:
+      self.env.attention_weights = weights
+      self.env.attention_points_b = points
+    return actions
+
+  def reset(self, *args, **kwargs):
+    if hasattr(self.policy, "reset"):
+      return self.policy.reset(*args, **kwargs)
+    return None
+
+
+def _wrap_teacher_attention_visualization_policy(policy, env):
+  """Add attention rendering state only to AME teacher play policies."""
+  model = getattr(policy, "model", None)
+  encoder = getattr(model, "privileged_encoder", None)
+  if (
+    encoder is None
+    or not hasattr(encoder, "last_attention_weights")
+    or not hasattr(encoder, "last_attention_points")
+  ):
+    return policy
+  return _TeacherAttentionVisualizationPolicy(policy, env)
 
 
 class _PredictedLinVelPolicy:
@@ -225,6 +333,13 @@ def run_play(task_id: str, cfg: PlayConfig):
       )
     log_dir = resume_path.parent
 
+    if _is_legacy_ame_checkpoint(resume_path):
+      _apply_legacy_ame_play_compat(env_cfg, agent_cfg)
+      print(
+        "[INFO]: Detected pre-a500b38 AME checkpoint; restored its terrain scan "
+        "and encoder layout for play."
+      )
+
   if cfg.num_envs is not None:
     env_cfg.scene.num_envs = cfg.num_envs
   if cfg.video_height is not None:
@@ -282,7 +397,14 @@ def run_play(task_id: str, cfg: PlayConfig):
     policy = _select_play_policy(
       runner.get_inference_policy(device=device), cfg.policy_role
     )
-  policy = _wrap_predicted_lin_vel_policy(policy, env.unwrapped)
+  def _wrap_play_policy(loaded_policy):
+    if cfg.policy_role == "teacher":
+      loaded_policy = _wrap_teacher_attention_visualization_policy(
+        loaded_policy, env.unwrapped
+      )
+    return _wrap_predicted_lin_vel_policy(loaded_policy, env.unwrapped)
+
+  policy = _wrap_play_policy(policy)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
@@ -319,8 +441,8 @@ def run_play(task_id: str, cfg: PlayConfig):
       ckpt_manager = CheckpointManager(
         current_name=resume_path.name,
         fetch_available=fetch_available_local,
-        load_checkpoint=lambda name: _wrap_predicted_lin_vel_policy(
-          _reload_policy(str(ckpt_dir / name)), env.unwrapped
+        load_checkpoint=lambda name: _wrap_play_policy(
+          _reload_policy(str(ckpt_dir / name))
         ),
       )
     else:
@@ -352,11 +474,10 @@ def run_play(task_id: str, cfg: PlayConfig):
       ckpt_manager = CheckpointManager(
         current_name=resume_path.name,
         fetch_available=fetch_available_wandb,
-        load_checkpoint=lambda name: _wrap_predicted_lin_vel_policy(
+        load_checkpoint=lambda name: _wrap_play_policy(
           _reload_policy(
             str(get_wandb_checkpoint_path(_log_root, Path(run_path), name)[0])
-          ),
-          env.unwrapped,
+          )
         ),
         run_name=_parse_wandb_dt(wandb_run.created_at).strftime("%Y-%m-%d_%H-%M-%S"),
         run_url=wandb_run.url,

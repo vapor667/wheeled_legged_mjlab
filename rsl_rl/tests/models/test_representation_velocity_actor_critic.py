@@ -362,18 +362,22 @@ def test_depth_ame_eval_path_caches_attention_weights() -> None:
     model.train()
     model.get_privileged_latent(obs)
     assert model.privileged_encoder.last_attention_weights is None
+    assert model.privileged_encoder.last_attention_points is None
 
     model.eval()
     model.get_privileged_latent(obs)
 
     attention_weights = model.privileged_encoder.last_attention_weights
+    attention_points = model.privileged_encoder.last_attention_points
     assert attention_weights is not None
+    assert attention_points is not None
     assert attention_weights.shape == (
         NUM_ENVS,
         AME_NUM_HEADS,
         1,
         AME_DOWNSAMPLED_TOKENS,
     )
+    assert attention_points.shape == (NUM_ENVS, AME_DOWNSAMPLED_TOKENS, 3)
 
 
 def test_depth_ame_global_context_path_has_expected_shape() -> None:

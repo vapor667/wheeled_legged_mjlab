@@ -14,6 +14,64 @@ if TYPE_CHECKING:
   from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 
+def draw_attention_weights(
+  env: ManagerBasedRlEnv,
+  visualizer: DebugVisualizer,
+  *,
+  asset_name: str = "robot",
+  max_points: int = 64,
+) -> None:
+  """Draw an AME teacher's highest-attention terrain points in world space."""
+  points_b = getattr(env, "attention_points_b", None)
+  attention_weights = getattr(env, "attention_weights", None)
+  if points_b is None or attention_weights is None or asset_name not in env.scene.entities:
+    return
+
+  points_b = points_b.detach()
+  attention_weights = attention_weights.detach()
+  if points_b.ndim != 3 or points_b.shape[-1] != 3:
+    return
+  if attention_weights.ndim == 4:
+    # [batch, heads, query=1, points] -> one score per terrain point.
+    attention_weights = attention_weights.mean(dim=1).squeeze(1)
+  if attention_weights.ndim != 2 or attention_weights.shape != points_b.shape[:2]:
+    return
+
+  env_indices = list(visualizer.get_env_indices(env.num_envs))
+  if not env_indices:
+    return
+
+  asset = env.scene[asset_name]
+  base_pos_w = asset.data.root_link_pos_w.detach()
+  heading_w = asset.data.heading_w.detach()
+  point_count = min(max_points, points_b.shape[1])
+
+  for env_id in env_indices:
+    weights = attention_weights[env_id]
+    if not torch.isfinite(weights).all() or weights.max() <= 0:
+      continue
+    point_ids = torch.topk(weights, k=point_count).indices
+    weights = weights[point_ids]
+    normalized_weights = weights / weights.max()
+    points = points_b[env_id, point_ids]
+
+    cos_h = torch.cos(heading_w[env_id])
+    sin_h = torch.sin(heading_w[env_id])
+    points_w = torch.empty_like(points)
+    points_w[:, 0] = base_pos_w[env_id, 0] + cos_h * points[:, 0] - sin_h * points[:, 1]
+    points_w[:, 1] = base_pos_w[env_id, 1] + sin_h * points[:, 0] + cos_h * points[:, 1]
+    points_w[:, 2] = base_pos_w[env_id, 2] + points[:, 2] + 0.015
+
+    for point_w, weight in zip(points_w.cpu().numpy(), normalized_weights.cpu().numpy()):
+      # Blue points are low attention; red, larger points are high attention.
+      visualizer.add_sphere(
+        center=point_w,
+        radius=0.008 + 0.04 * float(weight),
+        color=(float(weight), 0.1, 1.0 - float(weight), 0.25 + 0.75 * float(weight)),
+        label="teacher_attention",
+      )
+
+
 def _roughness_indicator_params(env: ManagerBasedRlEnv) -> dict[str, Any] | None:
   observations = getattr(env.cfg, "observations", {})
   for group_name in ("actor", "critic"):
