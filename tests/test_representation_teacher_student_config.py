@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+import importlib.util
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,14 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     wf_tron1b_rough_env_cfg,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp import observations as observation_mdp
+
+
+PLAY_PATH = Path(__file__).resolve().parents[1] / "scripts" / "rsl_rl" / "play.py"
+PLAY_SPEC = importlib.util.spec_from_file_location("rsl_rl_play_script", PLAY_PATH)
+assert PLAY_SPEC is not None
+assert PLAY_SPEC.loader is not None
+play = importlib.util.module_from_spec(PLAY_SPEC)
+PLAY_SPEC.loader.exec_module(play)
 
 
 def test_representation_teacher_student_tasks_are_registered() -> None:
@@ -132,7 +141,7 @@ def test_representation_velocity_observation_groups() -> None:
     assert "base_lin_vel" in critic_terms
     assert "command" in critic_terms
     assert "base_lin_vel" not in privileged_terms
-    assert "command" not in privileged_terms
+    assert "command" in privileged_terms
     assert "height_scan" in critic_terms
     assert "height_scan" in privileged_terms
 
@@ -398,7 +407,7 @@ def _make_velocity_representation_policy() -> RepresentationVelocityActorCritic:
             "actor_command": ["actor_command"],
             "lin_vel_target": ["lin_vel_target"],
             "critic": ["critic"],
-            "privileged_encoder": ["privileged_encoder"],
+            "privileged_encoder": ["privileged_encoder", "actor_command"],
         },
         output_dim=2,
         hidden_dims=[8],
@@ -443,11 +452,104 @@ def test_non_representation_metadata_stays_legacy_shape() -> None:
     assert "student_observation_names" not in metadata
 
 
+@dataclass
+class _DummyAgentCfg:
+    experiment_name: str = "dummy_experiment"
+    clip_actions: float | None = None
+
+
+class _DummyEnv:
+    def __init__(self, cfg, device, render_mode):
+        self.cfg = cfg
+        self.device = device
+        self.render_mode = render_mode
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _DummyPolicy:
+    def __init__(self):
+        self.student_called = False
+        self.teacher_called = False
+
+    def __call__(self, obs):
+        del obs
+        self.student_called = True
+        return torch.tensor([1.0])
+
+    def act_teacher(self, obs, stochastic_output=False):
+        del obs, stochastic_output
+        self.teacher_called = True
+        return torch.tensor([2.0])
+
+
+class _DummyRunner:
+    policy = _DummyPolicy()
+
+    def __init__(self, env, cfg, device):
+        self.env = env
+        self.cfg = cfg
+        self.device = device
+        self.loaded = None
+
+    def load(self, path, load_cfg=None, strict=True, map_location=None):
+        self.loaded = (path, load_cfg, strict, map_location)
+
+    def get_inference_policy(self, device=None):
+        del device
+        return self.policy
+
+
+def test_play_initial_teacher_role_uses_teacher_policy(monkeypatch, tmp_path) -> None:
+    checkpoint = tmp_path / "model_1.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    _DummyRunner.policy = _DummyPolicy()
+
+    env_cfg = SimpleNamespace(
+        commands={},
+        scene=SimpleNamespace(num_envs=1),
+        viewer=SimpleNamespace(height=None, width=None),
+    )
+    captured = {}
+
+    class DummyViewer:
+        def __init__(self, env, policy, checkpoint_manager=None):
+            captured["env"] = env
+            captured["policy"] = policy
+            captured["checkpoint_manager"] = checkpoint_manager
+
+        def run(self):
+            captured["action"] = captured["policy"]({"obs": torch.tensor([0.0])})
+
+    monkeypatch.setattr(play, "configure_torch_backends", lambda: None)
+    monkeypatch.setattr(play, "load_env_cfg", lambda task_id, play: env_cfg)
+    monkeypatch.setattr(play, "load_rl_cfg", lambda task_id: _DummyAgentCfg())
+    monkeypatch.setattr(play, "load_runner_cls", lambda task_id: _DummyRunner)
+    monkeypatch.setattr(play, "WheeledLeggedVelocityEnv", _DummyEnv)
+    monkeypatch.setattr(play, "RslRlVecEnvWrapper", lambda env, clip_actions: env)
+    monkeypatch.setattr(play, "NativeMujocoViewer", DummyViewer)
+
+    play.run_play(
+        "dummy_task",
+        play.PlayConfig(
+            checkpoint_file=str(checkpoint),
+            device="cpu",
+            viewer="native",
+            policy_role="teacher",
+        ),
+    )
+
+    assert torch.equal(captured["action"], torch.tensor([2.0]))
+    assert _DummyRunner.policy.teacher_called
+    assert not _DummyRunner.policy.student_called
+
+
 def test_representation_tests_are_not_git_ignored() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     paths = [
         "tests/test_representation_teacher_student_config.py",
-        "tests/test_experiment_overrides.py",
         "rsl_rl/tests/models/test_representation_actor_critic.py",
         "rsl_rl/tests/models/test_representation_velocity_actor_critic.py",
         "rsl_rl/tests/algorithms/test_representation_teacher_student_ppo.py",

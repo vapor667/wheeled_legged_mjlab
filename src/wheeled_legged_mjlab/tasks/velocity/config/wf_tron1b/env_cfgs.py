@@ -71,7 +71,7 @@ NON_WHEEL_COLLISION_GEOMS = (
 )
 
 BASE_HEIGHT_TARGET = 0.82
-WHEEL_DISTANCE_RANGE = (0.28, 0.55)
+WHEEL_DISTANCE_RANGE = (0.30, 0.55)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
@@ -255,7 +255,7 @@ def make_observations(
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
-            noise=Unoise(n_min=-0.5, n_max=0.5),
+            noise=Unoise(n_min=-0.2, n_max=0.2),
             scale=0.5,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
@@ -344,7 +344,6 @@ def make_observations(
     if lin_vel_representation:
         privileged_encoder_terms = deepcopy(critic_terms)
         privileged_encoder_terms.pop("base_lin_vel", None)
-        privileged_encoder_terms.pop("command", None)
         observations = {
             "proprio_history": ObservationGroupCfg(
                 terms=dict(proprio_terms),
@@ -626,10 +625,10 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "track_heading": RewardTermCfg(
             func=mdp.track_heading,
-            weight=1.0,
+            weight=0.5,
             params={
                 "command_name": COMMAND_NAME,
-                "std": math.sqrt(0.25),
+                "std": math.sqrt(0.20),
                 "command_norm_threshold": 0.05,
             },
         ),
@@ -778,7 +777,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-1.0e-2,
+                    weight=-2.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,

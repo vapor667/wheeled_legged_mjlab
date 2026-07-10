@@ -54,7 +54,6 @@ tests/
 !tests/
 tests/*
 !tests/test_action_delay.py
-!tests/test_experiment_overrides.py
 !tests/test_fell_over_curriculum.py
 !tests/test_representation_teacher_student_config.py
 !rsl_rl/tests/
@@ -158,6 +157,11 @@ mnesia/
 rabbitmq/
 rabbitmq-data/
 
+# Experiment runs and generated artifacts are local-only. Keep sweep definitions versioned.
+/experiments/*
+!/experiments/sweeps/
+!/experiments/sweeps/*.yaml
+
 # ActiveMQ
 activemq-data/
 
@@ -236,7 +240,6 @@ __marimo__/
 # training results
 wandb/
 logs/
-experiments/results/
 
 # MuJoCo
 MUJOCO_LOG.TXT
