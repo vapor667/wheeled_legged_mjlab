@@ -53,14 +53,6 @@ variants:
         y_half: 0.5
         resolution: 0.1
 
-  U6_big_model:
-    desc: Increase actor, representation, and depth model capacity.
-    rl:
-      latent_dim: 64
-      depth_feature_dim: 128
-      depth_gru_hidden_dim: 128
-      depth_channels: [32, 64, 64]
-
   U7_all_big:
     desc: Increase inputs and model capacity together.
     env:
