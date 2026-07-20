@@ -44,7 +44,7 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
         lin_vel_loss_coef: float = 1.0,
         latent_dynamics_loss_coef: float = 0.0,
         latent_dynamics_velocity_loss_coef: float = 1.0,
-        latent_dynamics_use_ema_target: bool = False,
+        latent_dynamics_use_ema_target: bool = True,
         latent_dynamics_ema_decay: float = 0.99,
         latent_dynamics_horizons: tuple[int, ...] | list[int] = (1,),
         latent_dynamics_horizon_weights: tuple[float, ...] | list[float] = (1.0,),
@@ -458,8 +458,6 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
             mean_combined_grad_norm += combined_grad_norm
             combined_grad_clip_count += combined_grad_norm > self.max_grad_norm
             self.optimizer.step()
-            if self.latent_dynamics_enabled and self.latent_dynamics_use_ema_target:
-                self._raw_actor.update_latent_dynamics_target(self.latent_dynamics_ema_decay)
 
             if collect_update_diagnostics:
                 encoder_update_norm = self._parameter_delta_norm(
@@ -699,8 +697,25 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
                         mean_latent_direct_rollout_velocity_loss
                     ),
                 })
+        if self.latent_dynamics_enabled and self.latent_dynamics_use_ema_target:
+            loss_dict.update(self._compute_teacher_latent_diagnostics())
+            self._raw_actor.update_target_privileged_encoder(self.latent_dynamics_ema_decay)
         self.storage.clear()
         return loss_dict
+
+    @torch.no_grad()
+    def _compute_teacher_latent_diagnostics(self, max_samples: int = 4096) -> dict[str, float]:
+        observations = self.storage.observations.flatten(0, 1)
+        num_samples = observations.batch_size[0]
+        if num_samples > max_samples:
+            sample_indices = torch.linspace(
+                0,
+                num_samples - 1,
+                steps=max_samples,
+                device=self.device,
+            ).long()
+            observations = observations[sample_indices]
+        return self._raw_actor.compute_privileged_latent_diagnostics(observations)
 
     def _latent_dynamics_batch_generator(
         self,

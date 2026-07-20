@@ -383,7 +383,7 @@ def test_depth_dynamics_predicts_latent_and_velocity_with_isolated_gradients() -
 
     def capture_target(
         obs: TensorDict,
-        use_ema_target: bool = False,
+        use_ema_target: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         latent, normalized_lin_vel = original_get_latent_dynamics_target(
             obs,
@@ -409,7 +409,7 @@ def test_depth_dynamics_predicts_latent_and_velocity_with_isolated_gradients() -
     assert all(param.grad is None for param in model.latent_dynamics_predictors["5"].parameters())
     assert any(param.grad is not None for param in model.latent_dynamics_predictors["10"].parameters())
     assert any(param.grad is not None for param in model.privileged_encoder.parameters())
-    assert all(param.grad is None for param in model.latent_dynamics_target_encoder.parameters())
+    assert all(param.grad is None for param in model.target_privileged_encoder.parameters())
     assert all(param.grad is None for param in model.actor_head.parameters())
     assert all(param.grad is None for param in model.critic_head.parameters())
     assert all(param.grad is None for param in model.depth_encoder.parameters())
@@ -452,7 +452,7 @@ def test_depth_latent_dynamics_can_detach_source_for_representation_ablation() -
     assert any(param.grad is not None for param in model.latent_dynamics_predictors["5"].parameters())
 
 
-def test_depth_dynamics_uses_ground_truth_velocity_and_keeps_optional_ema_target() -> None:
+def test_depth_dynamics_uses_ground_truth_velocity_and_ema_latent_target() -> None:
     obs = make_depth_rep_obs()
     model = make_depth_predictor_model(obs)
     obs["lin_vel_target"] = torch.full((NUM_ENVS, LIN_VEL_DIM), 2.0)
@@ -464,14 +464,14 @@ def test_depth_dynamics_uses_ground_truth_velocity_and_keeps_optional_ema_target
 
     assert torch.equal(normalized_target, obs["lin_vel_target"])
     assert not torch.equal(normalized_target, student_prediction)
-    assert all(not parameter.requires_grad for parameter in model.latent_dynamics_target_encoder.parameters())
+    assert all(not parameter.requires_grad for parameter in model.target_privileged_encoder.parameters())
 
     online_target_before, _ = model.get_latent_dynamics_target(obs, use_ema_target=False)
     ema_target_before, _ = model.get_latent_dynamics_target(obs, use_ema_target=True)
     assert torch.allclose(online_target_before, ema_target_before)
 
     target_before = [
-        parameter.detach().clone() for parameter in model.latent_dynamics_target_encoder.parameters()
+        parameter.detach().clone() for parameter in model.target_privileged_encoder.parameters()
     ]
     with torch.no_grad():
         for parameter in model.privileged_encoder.parameters():
@@ -479,17 +479,46 @@ def test_depth_dynamics_uses_ground_truth_velocity_and_keeps_optional_ema_target
     online_after = [parameter.detach().clone() for parameter in model.privileged_encoder.parameters()]
     online_target_after, _ = model.get_latent_dynamics_target(obs, use_ema_target=False)
     ema_target_after, _ = model.get_latent_dynamics_target(obs, use_ema_target=True)
+    default_target_after, _ = model.get_latent_dynamics_target(obs)
     assert not torch.allclose(online_target_after, ema_target_after)
+    assert torch.allclose(default_target_after, ema_target_after)
 
-    model.update_latent_dynamics_target(decay=0.5)
+    model.update_target_privileged_encoder(decay=0.5)
 
     for target_parameter, previous_target, online_parameter in zip(
-        model.latent_dynamics_target_encoder.parameters(),
+        model.target_privileged_encoder.parameters(),
         target_before,
         online_after,
         strict=True,
     ):
         assert torch.allclose(target_parameter, 0.5 * previous_target + 0.5 * online_parameter)
+
+
+def test_teacher_latent_diagnostics_detect_directional_collapse() -> None:
+    model = make_depth_predictor_model()
+    obs = make_depth_rep_obs()
+    collapsed_latent = torch.zeros(NUM_ENVS, LATENT_DIM)
+    collapsed_latent[:, 0] = 1.0
+    model.get_privileged_latent = lambda _: collapsed_latent  # type: ignore[method-assign]
+    model.get_target_privileged_latent = lambda _: collapsed_latent  # type: ignore[method-assign]
+
+    collapsed_metrics = model.compute_privileged_latent_diagnostics(obs)
+
+    assert collapsed_metrics["teacher_online_ema_cosine_similarity"] == 1.0
+    assert collapsed_metrics["teacher_latent_feature_variance"] == 0.0
+    assert collapsed_metrics["teacher_latent_covariance_effective_rank"] == 0.0
+    assert collapsed_metrics["teacher_latent_batch_mean_norm"] == 1.0
+
+    diverse_latent = torch.eye(LATENT_DIM)
+    model.get_privileged_latent = lambda _: diverse_latent  # type: ignore[method-assign]
+    model.get_target_privileged_latent = lambda _: diverse_latent  # type: ignore[method-assign]
+
+    diverse_metrics = model.compute_privileged_latent_diagnostics(obs)
+
+    assert diverse_metrics["teacher_online_ema_cosine_similarity"] == 1.0
+    assert diverse_metrics["teacher_latent_feature_variance"] > 0.0
+    assert diverse_metrics["teacher_latent_covariance_effective_rank"] > 1.0
+    assert diverse_metrics["teacher_latent_batch_mean_norm"] < 1.0
 
 
 def test_depth_sequence_student_losses_use_continuous_depth_state() -> None:

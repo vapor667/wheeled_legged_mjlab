@@ -62,8 +62,8 @@ class DepthRepresentationVelocityPredictorActorCritic(DepthRepresentationVelocit
             raise ValueError("latent_dynamics_horizons must not contain duplicates.")
         self.latent_dynamics_action_dim = output_dim
         self.latent_dynamics_state_dim = latent_dim + self.lin_vel_dim
-        self.latent_dynamics_target_encoder = copy.deepcopy(self.privileged_encoder)
-        self.latent_dynamics_target_encoder.requires_grad_(False)
+        self.target_privileged_encoder = copy.deepcopy(self.privileged_encoder)
+        self.target_privileged_encoder.requires_grad_(False)
         self.latent_dynamics_predictors = torch.nn.ModuleDict(
             {
                 str(horizon): MLP(
@@ -90,29 +90,60 @@ class DepthRepresentationVelocityPredictorActorCritic(DepthRepresentationVelocit
         """Return ground-truth linear velocity in the actor's normalized coordinates."""
         return self.lin_vel_normalizer(self.get_lin_vel_target(obs))
 
+    def get_target_privileged_latent(self, obs: TensorDict) -> torch.Tensor:
+        """Encode privileged observations with the EMA target encoder."""
+        latent = self.target_privileged_encoder(self.get_privileged_obs(obs))
+        return self._normalize_latent(latent)
+
     @torch.no_grad()
     def get_latent_dynamics_target(
         self,
         obs: TensorDict,
-        use_ema_target: bool = False,
+        use_ema_target: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return detached latent and normalized ground-truth velocity targets."""
         if use_ema_target:
-            latent = self.latent_dynamics_target_encoder(self.get_privileged_obs(obs))
-            latent = self._normalize_latent(latent)
+            latent = self.get_target_privileged_latent(obs)
         else:
             latent = self.get_privileged_latent(obs)
         return latent, self.get_normalized_lin_vel_target(obs)
 
     @torch.no_grad()
-    def update_latent_dynamics_target(self, decay: float) -> None:
-        """Update the training-only target encoder with an exponential moving average."""
+    def update_target_privileged_encoder(self, decay: float) -> None:
+        """Update the target privileged encoder with an exponential moving average."""
         for target_parameter, online_parameter in zip(
-            self.latent_dynamics_target_encoder.parameters(),
+            self.target_privileged_encoder.parameters(),
             self.privileged_encoder.parameters(),
             strict=True,
         ):
             target_parameter.lerp_(online_parameter, 1.0 - decay)
+
+    @torch.no_grad()
+    def compute_privileged_latent_diagnostics(self, obs: TensorDict) -> dict[str, float]:
+        """Measure online-target alignment and teacher latent collapse indicators."""
+        online_latent = self.get_privileged_latent(obs)
+        target_latent = self.get_target_privileged_latent(obs)
+        centered_latent = online_latent - online_latent.mean(dim=0, keepdim=True)
+        feature_variance = centered_latent.square().mean(dim=0).mean()
+        covariance = centered_latent.transpose(0, 1) @ centered_latent
+        covariance = covariance / max(online_latent.shape[0] - 1, 1)
+        eigenvalues = torch.linalg.eigvalsh(covariance.float()).clamp_min(0.0)
+        eigenvalue_sum = eigenvalues.sum()
+        if eigenvalue_sum.item() > 0.0:
+            spectrum = eigenvalues / eigenvalue_sum
+            effective_rank = torch.exp(-(spectrum * torch.log(spectrum.clamp_min(1.0e-12))).sum())
+        else:
+            effective_rank = torch.zeros((), device=online_latent.device)
+        return {
+            "teacher_online_ema_cosine_similarity": F.cosine_similarity(
+                online_latent,
+                target_latent,
+                dim=-1,
+            ).mean().item(),
+            "teacher_latent_feature_variance": feature_variance.item(),
+            "teacher_latent_covariance_effective_rank": effective_rank.item(),
+            "teacher_latent_batch_mean_norm": online_latent.mean(dim=0).norm().item(),
+        }
 
     def predict_privileged_state(
         self,
@@ -148,7 +179,7 @@ class DepthRepresentationVelocityPredictorActorCritic(DepthRepresentationVelocit
         obs_future: TensorDict,
         horizon: int = 1,
         detach_source: bool = False,
-        use_ema_target: bool = False,
+        use_ema_target: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         latent_t = self.get_privileged_latent(obs_t)
         normalized_lin_vel_t = self.get_normalized_lin_vel_target(obs_t)

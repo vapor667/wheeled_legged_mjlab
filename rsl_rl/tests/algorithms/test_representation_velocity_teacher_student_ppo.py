@@ -373,6 +373,10 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "latent_direct_rollout_cosine_k5",
         "latent_direct_rollout_mse_k5",
         "latent_direct_rollout_velocity_loss_k5",
+        "teacher_online_ema_cosine_similarity",
+        "teacher_latent_feature_variance",
+        "teacher_latent_covariance_effective_rank",
+        "teacher_latent_batch_mean_norm",
     } <= set(losses)
     assert losses["Grad/privileged_encoder_ppo_norm"] > 0.0
     assert losses["Grad/privileged_encoder_dynamics_norm"] > 0.0
@@ -388,6 +392,10 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
     assert losses["Update/policy_kl_joint"] >= 0.0
     assert losses["Update/policy_kl_ppo_only"] >= 0.0
     assert losses["Update/joint_step_fraction"] == pytest.approx(0.5)
+    assert -1.0 <= losses["teacher_online_ema_cosine_similarity"] <= 1.0
+    assert losses["teacher_latent_feature_variance"] >= 0.0
+    assert 0.0 <= losses["teacher_latent_covariance_effective_rank"] <= alg.actor.latent_dim
+    assert 0.0 <= losses["teacher_latent_batch_mean_norm"] <= 1.0 + 1.0e-6
     for step in range(1, 6):
         assert {
             f"latent_rollout_loss_k{step}",
@@ -449,13 +457,13 @@ def test_depth_dynamics_updates_predictor_and_records_applied_actions() -> None:
     }
     target_encoder_before = {
         name: param.detach().clone()
-        for name, param in alg.actor.latent_dynamics_target_encoder.named_parameters()
+        for name, param in alg.actor.target_privileged_encoder.named_parameters()
     }
     losses = alg.update()
 
     for horizon, predictor in alg.actor.latent_dynamics_predictors.items():
         assert any_param_changed(predictor_before[horizon], predictor)
-    assert not any_param_changed(target_encoder_before, alg.actor.latent_dynamics_target_encoder)
+    assert any_param_changed(target_encoder_before, alg.actor.target_privileged_encoder)
     assert losses["latent_dynamics_valid_fraction"] == pytest.approx(1.0)
     assert losses["latent_dynamics_valid_fraction_k1"] == pytest.approx(1.0)
     assert losses["latent_dynamics_valid_fraction_k5"] == pytest.approx(1.0)
@@ -472,18 +480,28 @@ def test_depth_dynamics_uses_joint_optimizer_steps_only() -> None:
     alg, obs = build_depth_algorithm()
     fill_rollout(alg, obs)
     optimizer_steps = 0
+    ema_updates = 0
     original_step = alg.optimizer.step
+    original_ema_update = alg.actor.update_target_privileged_encoder
 
     def counted_step(*args, **kwargs):
         nonlocal optimizer_steps
         optimizer_steps += 1
         return original_step(*args, **kwargs)
 
+    def counted_ema_update(*args, **kwargs):
+        nonlocal ema_updates
+        assert optimizer_steps == alg.num_learning_epochs * alg.num_mini_batches
+        ema_updates += 1
+        return original_ema_update(*args, **kwargs)
+
     alg.optimizer.step = counted_step
+    alg.actor.update_target_privileged_encoder = counted_ema_update  # type: ignore[method-assign]
 
     alg.update()
 
     assert optimizer_steps == alg.num_learning_epochs * alg.num_mini_batches
+    assert ema_updates == 1
 
 
 def test_joint_dynamics_respects_detached_source_encoder() -> None:

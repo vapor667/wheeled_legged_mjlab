@@ -89,7 +89,7 @@ class RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
 
     latent_dynamics_loss_coef: float = 3.0
     latent_dynamics_velocity_loss_coef: float = 1.0
-    latent_dynamics_use_ema_target: bool = False
+    latent_dynamics_use_ema_target: bool = True
     latent_dynamics_ema_decay: float = 0.99
     latent_dynamics_horizons: Tuple[int, ...] = (1, 5)
     latent_dynamics_horizon_weights: Tuple[float, ...] = (1.0, 0.5)
@@ -295,7 +295,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         lin_vel_loss_coef=1.0,
         latent_dynamics_loss_coef=3.0,
         latent_dynamics_velocity_loss_coef=1.0,
-        latent_dynamics_use_ema_target=False,
+        latent_dynamics_use_ema_target=True,
         latent_dynamics_ema_decay=0.99,
         latent_dynamics_horizons=(1, 5, 10),
         latent_dynamics_horizon_weights=(1.0, 0.75, 0.5),
