@@ -102,9 +102,15 @@ DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG = (-1.0, 1.0)
 ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
 ROUGHNESS_GATE_THRESHOLD_FINAL = 0.25
 ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
+RECOVERY_START_ITERATION = 5_000
+RECOVERY_STEPS_PER_ITERATION = 24
+RECOVERY_START_STEP = RECOVERY_START_ITERATION * RECOVERY_STEPS_PER_ITERATION
 FELL_OVER_LIMIT_ANGLE_INITIAL = math.radians(65.0)
-FELL_OVER_LIMIT_ANGLE_FINAL = math.radians(85.0)
-FELL_OVER_LIMIT_ANGLE_RAMP_STEPS = 5_000 * 24
+FELL_OVER_LIMIT_ANGLE_FINAL = math.radians(95.0)
+FELL_OVER_LIMIT_ANGLE_RAMP_STEPS = RECOVERY_START_STEP
+RECOVERY_FALLEN_FRACTION = 0.3
+RECOVERY_UPRIGHT_GATE_HI = 0.6
+RECOVERY_UPRIGHT_THRESHOLD = 0.9
 
 
 def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
@@ -519,7 +525,12 @@ def make_commands() -> dict[str, CommandTermCfg]:
     }
 
 
-def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
+def make_events(
+    *,
+    depth: bool = False,
+    recovery: bool = False,
+    recovery_start_step: int = RECOVERY_START_STEP,
+) -> dict[str, EventTermCfg]:
     """Reset logic and domain randomization used by the velocity task."""
     events = {
         "prepare_quantities": EventTermCfg(
@@ -676,10 +687,48 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                 ),
             }
         )
+    if recovery:
+        reset_base = events["reset_base"]
+        reset_base.func = mdp.reset_root_state_partial_fallen
+        reset_base.params.update(
+            {
+                "fallen_pose_range": {
+                    "x": (-0.5, 0.5),
+                    "y": (-0.5, 0.5),
+                    "z": (0.0, 0.3),
+                    "roll": (-math.pi, math.pi),
+                    "pitch": (-math.pi, math.pi),
+                    "yaw": (-math.pi, math.pi),
+                },
+                "fallen_velocity_range": {
+                    "x": (-0.5, 0.5),
+                    "y": (-0.5, 0.5),
+                    "z": (-0.5, 0.5),
+                    "roll": (-0.5, 0.5),
+                    "pitch": (-0.5, 0.5),
+                    "yaw": (-0.5, 0.5),
+                },
+                "fallen_fraction": RECOVERY_FALLEN_FRACTION,
+                "recovery_start_step": recovery_start_step,
+            }
+        )
+        reset_leg_joints = events["reset_leg_joints"]
+        reset_leg_joints.func = mdp.reset_joints_by_offset_after_step
+        reset_leg_joints.params.update(
+            {
+                "recovery_position_range": (-0.6, 0.8),
+                "recovery_start_step": recovery_start_step,
+            }
+        )
     return events
 
 
-def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
+def make_rewards(
+    *,
+    rough: bool,
+    recovery: bool = False,
+    recovery_start_step: int = RECOVERY_START_STEP,
+) -> dict[str, RewardTermCfg]:
     """Velocity tracking rewards plus wheel-legged posture and safety terms."""
     wheel_body_cfg = SceneEntityCfg(ROBOT_ENTITY, body_names=WHEEL_BODY_NAMES)
     wheel_joint_cfg = SceneEntityCfg(ROBOT_ENTITY, joint_names=WHEEL_JOINT_NAMES)
@@ -934,33 +983,102 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             }
         )
 
+    if recovery:
+        gated_terms = (
+            "track_linear_velocity",
+            "track_angular_velocity",
+            "base_ang_vel_xy",
+            "track_heading",
+            "upright",
+            "flat_orientation",
+            "base_height",
+            "pose",
+            "stand_still",
+            "wheel_distance",
+            "self_collisions",
+            "illegal_ground_contact",
+            "soft_landing",
+            "wheel_air_time_balance",
+            "rough_wheel_usage",
+            "rough_wheel_foot_clearance",
+            "rough_contact_pattern",
+            "non_rough_wheel_lateral_symmetry",
+            "non_rough_wheel_x_alignment",
+            "standing_forward_wheel_air_time",
+        )
+        for term_name in gated_terms:
+            if term_name in rewards:
+                rewards[term_name].params["upright_gate_hi"] = (
+                    RECOVERY_UPRIGHT_GATE_HI
+                )
+                rewards[term_name].params["upright_gate_start_step"] = (
+                    recovery_start_step
+                )
+
+        rewards["upward"] = RewardTermCfg(
+            func=mdp.upward,
+            weight=1.0,
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "recovery_start_step": recovery_start_step,
+            },
+        )
+        rewards["righting_progress"] = RewardTermCfg(
+            func=mdp.righting_progress,
+            weight=1.0,
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "max_progress": 0.1,
+                "recovery_start_step": recovery_start_step,
+            },
+        )
+        rewards["base_height"].params["post_recovery_scale"] = 0.2
+        rewards["upright"].params["post_recovery_scale"] = 0.2
+
     return rewards
 
 
-def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
+def make_terminations(
+    *,
+    rough: bool,
+    recovery: bool = False,
+    recovery_start_step: int = RECOVERY_START_STEP,
+) -> dict[str, TerminationTermCfg]:
     """Episode reset conditions."""
     terminations = {
         "non_finite_physics": TerminationTermCfg(func=mdp.non_finite_physics),
         "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
-        "fell_over": TerminationTermCfg(
-            func=mdp.bad_orientation,
-            params={"limit_angle": FELL_OVER_LIMIT_ANGLE_INITIAL},
-        ),
-        "illegal_contact": TerminationTermCfg(
-            func=mdp.illegal_contact,
-            params={"sensor_name": "illegal_ground_contact"},
-        ),
     }
+    terminations["fell_over"] = TerminationTermCfg(
+        func=mdp.bad_orientation_until_step if recovery else mdp.bad_orientation,
+        params={"limit_angle": FELL_OVER_LIMIT_ANGLE_INITIAL},
+    )
+    terminations["illegal_contact"] = TerminationTermCfg(
+        func=mdp.illegal_contact_until_step if recovery else mdp.illegal_contact,
+        params={"sensor_name": "illegal_ground_contact"},
+    )
+    if recovery:
+        terminations["fell_over"].params["deactivate_after_step"] = (
+            recovery_start_step
+        )
+        terminations["illegal_contact"].params["deactivate_after_step"] = (
+            recovery_start_step
+        )
     if rough:
         terminations["out_of_terrain_bounds"] = TerminationTermCfg(
             func=mdp.out_of_terrain_bounds,
-            params={"margin": 0.05},
+            params={"margin": 1.5 if recovery else 0.05},
             time_out=True,
         )
     return terminations
 
 
-def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
+def make_curriculum(
+    *,
+    rough: bool,
+    recovery: bool = False,
+    recovery_start_step: int = RECOVERY_START_STEP,
+) -> dict[str, CurriculumTermCfg]:
     """Training curricula for recovery tolerance and rough terrain."""
     curriculum = {
         "fell_over_limit_angle": CurriculumTermCfg(
@@ -973,6 +1091,11 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
             },
         )
     }
+    if recovery:
+        curriculum["recovery_phase"] = CurriculumTermCfg(
+            func=mdp.recovery_phase,
+            params={"start_step": recovery_start_step},
+        )
     if rough:
         curriculum["terrain_levels"] = CurriculumTermCfg(
             func=mdp.terrain_levels_vel,
@@ -981,10 +1104,37 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
     return curriculum
 
 
-def make_metrics() -> dict[str, MetricsTermCfg]:
-    return {
+def make_metrics(
+    *,
+    recovery: bool = False,
+    recovery_start_step: int = RECOVERY_START_STEP,
+) -> dict[str, MetricsTermCfg]:
+    metrics = {
         "mean_action_acc": MetricsTermCfg(func=mdp.mean_action_acc),
     }
+    if recovery:
+        metrics.update(
+            {
+                "recovery_success_rate": MetricsTermCfg(
+                    func=mdp.recovery_success_rate,
+                    params={
+                        "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                        "upright_threshold": RECOVERY_UPRIGHT_THRESHOLD,
+                        "recovery_start_step": recovery_start_step,
+                    },
+                ),
+                "time_to_recover": MetricsTermCfg(
+                    func=mdp.time_to_recover,
+                    params={
+                        "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                        "upright_threshold": RECOVERY_UPRIGHT_THRESHOLD,
+                        "recovery_start_step": recovery_start_step,
+                    },
+                    reduce="last",
+                ),
+            }
+        )
+    return metrics
 
 
 def make_sim(*, rough: bool) -> SimulationCfg:
@@ -1019,7 +1169,9 @@ def make_env_cfg(
     depth: bool = False,
     lin_vel_representation: bool = False,
     async_depth: bool = False,
+    recovery: bool = False,
 ) -> ManagerBasedRlEnvCfg:
+    recovery_start_step = 0 if play and recovery else RECOVERY_START_STEP
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
         observations=make_observations(
@@ -1030,11 +1182,30 @@ def make_env_cfg(
         ),
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
-        events=make_events(depth=depth),
-        rewards=make_rewards(rough=rough),
-        terminations=make_terminations(rough=rough),
-        curriculum=make_curriculum(rough=rough),
-        metrics=make_metrics(),
+        events=make_events(
+            depth=depth,
+            recovery=recovery,
+            recovery_start_step=recovery_start_step,
+        ),
+        rewards=make_rewards(
+            rough=rough,
+            recovery=recovery,
+            recovery_start_step=recovery_start_step,
+        ),
+        terminations=make_terminations(
+            rough=rough,
+            recovery=recovery,
+            recovery_start_step=recovery_start_step,
+        ),
+        curriculum=make_curriculum(
+            rough=rough,
+            recovery=recovery,
+            recovery_start_step=recovery_start_step,
+        ),
+        metrics=make_metrics(
+            recovery=recovery,
+            recovery_start_step=recovery_start_step,
+        ),
         viewer=make_viewer(),
         sim=make_sim(rough=rough),
         decimation=4,
@@ -1042,11 +1213,13 @@ def make_env_cfg(
         seed=0,
     )
     if play:
-        apply_play_overrides(cfg, rough=rough)
+        apply_play_overrides(cfg, rough=rough, recovery=recovery)
     return cfg
 
 
-def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
+def apply_play_overrides(
+    cfg: ManagerBasedRlEnvCfg, *, rough: bool, recovery: bool = False
+) -> None:
     """Make rollout/play deterministic enough to inspect behavior."""
     cfg.episode_length_s = int(1e9)
     if "actor" in cfg.observations:
@@ -1063,9 +1236,12 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         if "system_delay_range_s" in depth_term.params:
             depth_term.params["system_delay_range_s"] = (0.0, 0.0)
     cfg.curriculum = {}
-    cfg.terminations["fell_over"].params["limit_angle"] = (
-        FELL_OVER_LIMIT_ANGLE_FINAL
-    )
+    if recovery:
+        cfg.events["reset_base"].params["fallen_fraction"] = 1.0
+    else:
+        cfg.terminations["fell_over"].params["limit_angle"] = (
+            FELL_OVER_LIMIT_ANGLE_FINAL
+        )
 
     twist_cmd = cfg.commands[COMMAND_NAME]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
@@ -1111,6 +1287,16 @@ def wf_tron1b_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     return make_env_cfg(rough=False, play=play)
 
 
+def wf_tron1b_flat_recovery_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create WF-TRON1B flat-ground self-recovery configuration."""
+    return make_env_cfg(rough=False, play=play, recovery=True)
+
+
+def wf_tron1b_rough_recovery_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create WF-TRON1B rough-terrain self-recovery configuration."""
+    return make_env_cfg(rough=True, play=play, recovery=True)
+
+
 def wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create WF-TRON1B rough-terrain velocity representation configuration."""
     return make_env_cfg(rough=True, play=play, lin_vel_representation=True)
@@ -1124,6 +1310,20 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerB
         depth=True,
         lin_vel_representation=True,
         async_depth=True,
+    )
+
+
+def wf_tron1b_rough_rep_ts_lin_vel_depth_recovery_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Create the full async-depth velocity predictor environment with recovery."""
+    return make_env_cfg(
+        rough=True,
+        play=play,
+        depth=True,
+        lin_vel_representation=True,
+        async_depth=True,
+        recovery=True,
     )
 
 

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from mjlab.entity import Entity
+from mjlab.envs.mdp.terminations import bad_orientation as _bad_orientation
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 
@@ -16,6 +17,17 @@ if TYPE_CHECKING:
   from mjlab.managers.termination_manager import TerminationTermCfg
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+
+def bad_orientation_until_step(
+  env: ManagerBasedRlEnv,
+  limit_angle: float,
+  deactivate_after_step: int,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Apply the normal fall termination only before recovery training starts."""
+  fell_over = _bad_orientation(env, limit_angle=limit_angle, asset_cfg=asset_cfg)
+  return fell_over & (env.common_step_counter < deactivate_after_step)
 
 
 def non_finite_physics(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -76,6 +88,21 @@ def illegal_contact(
     return (force_mag > force_threshold).any(dim=-1).any(dim=-1)  # [B]
   assert data.found is not None
   return torch.any(data.found, dim=-1)
+
+
+def illegal_contact_until_step(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  deactivate_after_step: int,
+  force_threshold: float = 10.0,
+) -> torch.Tensor:
+  """Apply illegal-contact termination only before recovery training starts."""
+  contact = illegal_contact(
+    env,
+    sensor_name=sensor_name,
+    force_threshold=force_threshold,
+  )
+  return contact & (env.common_step_counter < deactivate_after_step)
 
 
 class velocity_direction_deviation:

@@ -113,6 +113,20 @@ def fell_over_limit_angle(
   return {"limit_angle": torch.tensor(limit_angle, device=env.device)}
 
 
+def recovery_phase(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor,
+  start_step: int,
+) -> dict[str, torch.Tensor]:
+  """Expose the binary recovery curriculum phase for logging."""
+  del env_ids
+  active = float(env.common_step_counter >= start_step)
+  return {
+    "active": torch.tensor(active, device=env.device),
+    "start_step": torch.tensor(start_step, device=env.device),
+  }
+
+
 def commands_vel(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from mjlab.entity import Entity
+from mjlab.envs.mdp.events import reset_joints_by_offset, reset_root_state_uniform
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply_inverse
@@ -12,6 +13,70 @@ from mjlab.utils.lab_api.math import quat_apply_inverse
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+
+def reset_root_state_partial_fallen(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    pose_range: dict[str, tuple[float, float]],
+    fallen_pose_range: dict[str, tuple[float, float]],
+    velocity_range: dict[str, tuple[float, float]] | None = None,
+    fallen_velocity_range: dict[str, tuple[float, float]] | None = None,
+    fallen_fraction: float = 0.3,
+    recovery_start_step: int = 0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Reset a random subset with arbitrary attitude and the rest normally."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, dtype=torch.int64, device=env.device)
+
+    effective_fraction = (
+        fallen_fraction if env.common_step_counter >= recovery_start_step else 0.0
+    )
+    fallen_mask = torch.rand(len(env_ids), device=env.device) < effective_fraction
+    upright_env_ids = env_ids[~fallen_mask]
+    fallen_env_ids = env_ids[fallen_mask]
+
+    if upright_env_ids.numel() > 0:
+        reset_root_state_uniform(
+            env,
+            upright_env_ids,
+            pose_range=pose_range,
+            velocity_range=velocity_range,
+            asset_cfg=asset_cfg,
+        )
+    if fallen_env_ids.numel() > 0:
+        reset_root_state_uniform(
+            env,
+            fallen_env_ids,
+            pose_range=fallen_pose_range,
+            velocity_range=fallen_velocity_range,
+            asset_cfg=asset_cfg,
+        )
+
+
+def reset_joints_by_offset_after_step(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    position_range: tuple[float, float],
+    velocity_range: tuple[float, float],
+    recovery_position_range: tuple[float, float],
+    recovery_start_step: int,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Use the wider recovery joint reset range only after its curriculum starts."""
+    active_position_range = (
+        recovery_position_range
+        if env.common_step_counter >= recovery_start_step
+        else position_range
+    )
+    reset_joints_by_offset(
+        env,
+        env_ids,
+        position_range=active_position_range,
+        velocity_range=velocity_range,
+        asset_cfg=asset_cfg,
+    )
 
 
 def _replace_non_finite_(tensor: torch.Tensor, env_ids: torch.Tensor) -> None:

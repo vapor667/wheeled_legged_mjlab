@@ -26,6 +26,87 @@ if TYPE_CHECKING:
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
+def _upright_gate(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  hi: float = 0.7,
+) -> torch.Tensor:
+  """Open locomotion rewards only when the robot is substantially upright."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.clamp(-asset.data.projected_gravity_b[:, 2], 0.0, hi) / hi
+
+
+def _apply_upright_gate(
+  value: torch.Tensor,
+  env: ManagerBasedRlEnv,
+  upright_gate_hi: float | None,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  upright_gate_start_step: int = 0,
+) -> torch.Tensor:
+  if (
+    upright_gate_hi is None
+    or env.common_step_counter < upright_gate_start_step
+  ):
+    return value
+  return value * _upright_gate(env, asset_cfg, upright_gate_hi)
+
+
+def _apply_post_recovery_scale(
+  value: torch.Tensor,
+  env: ManagerBasedRlEnv,
+  recovery_start_step: int,
+  post_recovery_scale: float,
+) -> torch.Tensor:
+  if env.common_step_counter < recovery_start_step:
+    return value
+  return value * post_recovery_scale
+
+
+def upward(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  recovery_start_step: int = 0,
+) -> torch.Tensor:
+  """Reward signed uprightness: upright=4, side=1, upside-down=0."""
+  asset: Entity = env.scene[asset_cfg.name]
+  reward = torch.square(1.0 - asset.data.projected_gravity_b[:, 2])
+  return reward * float(env.common_step_counter >= recovery_start_step)
+
+
+class righting_progress:
+  """Reward positive progress of the signed upright direction."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self._prev_up = torch.zeros(env.num_envs, device=env.device)
+    self._has_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    max_progress: float = 0.1,
+    recovery_start_step: int = 0,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    up = -asset.data.projected_gravity_b[:, 2]
+    if env.common_step_counter < recovery_start_step:
+      self._prev_up = up.detach()
+      self._has_prev[:] = False
+      return torch.zeros_like(up)
+    progress = torch.clamp(up - self._prev_up, 0.0, max_progress) / max_progress
+    progress = progress * self._has_prev.float()
+    self._prev_up = up.detach()
+    self._has_prev[:] = True
+    return progress
+
+  def reset(self, env_ids: torch.Tensor | slice | None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._prev_up[env_ids] = 0.0
+    self._has_prev[env_ids] = False
+
+
 class _TerrainRoughnessStats(NamedTuple):
   jump: torch.Tensor
   curvature: torch.Tensor
@@ -237,6 +318,8 @@ def track_linear_velocity(
   std: float,
   command_name: str,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Reward for tracking the commanded base linear velocity.
 
@@ -256,7 +339,10 @@ def track_linear_velocity(
   xy_error = torch.sum(torch.square(command_xy - actual[:, :2]), dim=1)
   z_error = torch.square(actual[:, 2])
   lin_vel_error = xy_error + z_error
-  return torch.exp(-lin_vel_error / std**2)
+  reward = torch.exp(-lin_vel_error / std**2)
+  return _apply_upright_gate(
+    reward, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+  )
 
 
 def track_angular_velocity(
@@ -264,6 +350,8 @@ def track_angular_velocity(
   std: float,
   command_name: str,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Reward tracking of the commanded yaw rate."""
   asset: Entity = env.scene[asset_cfg.name]
@@ -271,7 +359,10 @@ def track_angular_velocity(
   assert command is not None, f"Command '{command_name}' not found."
   actual = asset.data.root_link_ang_vel_b
   z_error = torch.square(command[:, 2] - actual[:, 2])
-  return torch.exp(-z_error / std**2)
+  reward = torch.exp(-z_error / std**2)
+  return _apply_upright_gate(
+    reward, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+  )
 
 
 def base_ang_vel_xy_l2(
@@ -279,11 +370,16 @@ def base_ang_vel_xy_l2(
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
   roll_weight: float = 1.0,
   pitch_weight: float = 1.0,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Penalize base roll and pitch angular velocity with independent weights."""
   asset: Entity = env.scene[asset_cfg.name]
   ang_vel_xy_sq = torch.square(asset.data.root_link_ang_vel_b[:, :2])
-  return roll_weight * ang_vel_xy_sq[:, 0] + pitch_weight * ang_vel_xy_sq[:, 1]
+  cost = roll_weight * ang_vel_xy_sq[:, 0] + pitch_weight * ang_vel_xy_sq[:, 1]
+  return _apply_upright_gate(
+    cost, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+  )
 
 
 def track_heading(
@@ -291,6 +387,8 @@ def track_heading(
   std: float,
   command_name: str,
   command_norm_threshold: float = 0.2,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Reward the base heading for aligning with the commanded world heading."""
   command_term = env.command_manager.get_term(command_name)
@@ -302,7 +400,13 @@ def track_heading(
     command_term.heading_target - command_term.robot.data.heading_w
   )
   reward = torch.exp(-torch.square(heading_error) / std**2)
-  return reward * active.float()
+  reward = reward * active.float()
+  return _apply_upright_gate(
+    reward,
+    env,
+    upright_gate_hi,
+    upright_gate_start_step=upright_gate_start_step,
+  )
 
 
 class heading_progress:
@@ -363,6 +467,8 @@ def stand_still(
   lin_threshold: float = 0.05,
   ang_threshold: float = 0.05,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Penalize drifting when the sampled velocity command is near zero."""
   asset: Entity = env.scene[asset_cfg.name]
@@ -377,7 +483,10 @@ def stand_still(
 
   lin_drift = torch.sum(torch.abs(asset.data.root_link_lin_vel_w[:, :2]), dim=1)
   yaw_drift = torch.abs(asset.data.root_link_ang_vel_w[:, 2])
-  return (lin_drift + yaw_drift) * still_command.float()
+  cost = (lin_drift + yaw_drift) * still_command.float()
+  return _apply_upright_gate(
+    cost, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+  )
 
 
 class upright:
@@ -403,6 +512,9 @@ class upright:
     std: float,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     terrain_sensor_names: tuple[str, ...] | None = None,
+    upright_gate_hi: float | None = None,
+    upright_gate_start_step: int = 0,
+    post_recovery_scale: float = 1.0,
   ) -> torch.Tensor:
     asset: Entity = env.scene[asset_cfg.name]
 
@@ -423,7 +535,13 @@ class upright:
       projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
       xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
 
-    return torch.exp(-xy_squared / std**2)
+    reward = torch.exp(-xy_squared / std**2)
+    reward = _apply_post_recovery_scale(
+      reward, env, upright_gate_start_step, post_recovery_scale
+    )
+    return _apply_upright_gate(
+      reward, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+    )
 
   def reset(self, env_ids: torch.Tensor) -> None:
     del env_ids  # Unused.
@@ -479,6 +597,8 @@ def self_collision_cost(
   env: ManagerBasedRlEnv,
   sensor_name: str,
   force_threshold: float = 10.0,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Penalize self-collisions.
 
@@ -495,9 +615,16 @@ def self_collision_cost(
     )
     force_mag = torch.norm(force_history, dim=-1)  # [B, N, H]
     hit = (force_mag > force_threshold).any(dim=1)  # [B, H]
-    return hit.sum(dim=-1).float()  # [B]
-  assert data.found is not None
-  return data.found.sum(dim=-1).float()
+    cost = hit.sum(dim=-1).float()  # [B]
+  else:
+    assert data.found is not None
+    cost = data.found.sum(dim=-1).float()
+  return _apply_upright_gate(
+    cost,
+    env,
+    upright_gate_hi,
+    upright_gate_start_step=upright_gate_start_step,
+  )
 
 
 def body_angular_velocity_penalty(
@@ -532,6 +659,9 @@ def base_height_l2(
   sensor_name: str | None = None,
   terrain_sample: str = "mean",
   deadband: float = 0.0,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
+  post_recovery_scale: float = 1.0,
 ) -> torch.Tensor:
   """Penalize base height error outside a symmetric deadband using an L2 kernel.
 
@@ -572,7 +702,27 @@ def base_height_l2(
     torch.abs(base_height - target_height) - deadband,
     min=0.0,
   )
-  return torch.square(height_error)
+  cost = torch.square(height_error)
+  cost = _apply_post_recovery_scale(
+    cost, env, upright_gate_start_step, post_recovery_scale
+  )
+  return _apply_upright_gate(
+    cost, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+  )
+
+
+def flat_orientation_l2(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
+) -> torch.Tensor:
+  """Penalize root tilt, optionally only while substantially upright."""
+  asset: Entity = env.scene[asset_cfg.name]
+  cost = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+  return _apply_upright_gate(
+    cost, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+  )
 
 
 def joint_power_l1(
@@ -632,6 +782,8 @@ def non_rough_wheel_lateral_symmetry(
   roughness_gate_threshold_final: float | None = None,
   roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Reward wheel lateral symmetry only when terrain is not rough."""
   stats = _terrain_roughness_from_sensor(
@@ -649,7 +801,10 @@ def non_rough_wheel_lateral_symmetry(
     roughness_gate_threshold_ramp_steps,
   )
   non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
-  return non_rough_active * wheel_lateral_symmetry(env, std, asset_cfg)
+  reward = non_rough_active * wheel_lateral_symmetry(env, std, asset_cfg)
+  return _apply_upright_gate(
+    reward, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+  )
 
 
 def non_rough_wheel_x_alignment(
@@ -663,6 +818,8 @@ def non_rough_wheel_x_alignment(
   roughness_gate_threshold_final: float | None = None,
   roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Penalize front-back wheel misalignment only when terrain is not rough."""
   stats = _terrain_roughness_from_sensor(
@@ -680,7 +837,10 @@ def non_rough_wheel_x_alignment(
     roughness_gate_threshold_ramp_steps,
   )
   non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
-  return non_rough_active * wheel_x_alignment(env, asset_cfg)
+  cost = non_rough_active * wheel_x_alignment(env, asset_cfg)
+  return _apply_upright_gate(
+    cost, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+  )
 
 
 def wheel_distance(
@@ -688,13 +848,18 @@ def wheel_distance(
   min_distance: float,
   max_distance: float,
   asset_cfg: SceneEntityCfg,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Penalize wheel distance outside an allowed range in the horizontal plane."""
   wheel_pos_b = _body_positions_in_base_frame(env, asset_cfg)
   distance = torch.norm(wheel_pos_b[:, 0, :2] - wheel_pos_b[:, 1, :2], dim=1)
-  return torch.clip(min_distance - distance, min=0.0) + torch.clip(
+  cost = torch.clip(min_distance - distance, min=0.0) + torch.clip(
     distance - max_distance,
     min=0.0,
+  )
+  return _apply_upright_gate(
+    cost, env, upright_gate_hi, asset_cfg, upright_gate_start_step
   )
 
 
@@ -745,6 +910,8 @@ class wheel_air_time_balance:
     sensor_name: str,
     min_total_air_time: float = 1.0,
     balance_tolerance: float = 0.2,
+    upright_gate_hi: float | None = None,
+    upright_gate_start_step: int = 0,
   ) -> torch.Tensor:
     if min_total_air_time <= 0.0:
       raise ValueError("min_total_air_time must be positive")
@@ -792,7 +959,12 @@ class wheel_air_time_balance:
       imbalance_ratio.mean()
     )
     log_data["Metrics/wheel_air_time_balance_cost_mean"] = cost.mean()
-    return cost
+    return _apply_upright_gate(
+      cost,
+      env,
+      upright_gate_hi,
+      upright_gate_start_step=upright_gate_start_step,
+    )
 
   def reset(self, env_ids: torch.Tensor | slice | None) -> None:
     if env_ids is None:
@@ -821,6 +993,8 @@ def standing_forward_wheel_air_time(
   forward_speed_threshold: float = 0.05,
   forward_lateral_threshold: float = 0.05,
   forward_ang_threshold: float = 0.05,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Penalize standing air time globally and forward air time only on non-rough terrain."""
   stats = _terrain_roughness_from_sensor(
@@ -877,7 +1051,12 @@ def standing_forward_wheel_air_time(
   log_data["Metrics/standing_forward_wheel_air_time_mean"] = cost.mean()
   log_data["Metrics/standing_wheel_air_time_mean"] = standing_cost.mean()
   log_data["Metrics/non_rough_forward_wheel_air_time_mean"] = forward_cost.mean()
-  return cost
+  return _apply_upright_gate(
+    cost,
+    env,
+    upright_gate_hi,
+    upright_gate_start_step=upright_gate_start_step,
+  )
 
 
 def rough_wheel_usage(
@@ -891,6 +1070,8 @@ def rough_wheel_usage(
   roughness_gate_threshold_final: float | None = None,
   roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Penalize wheel speed only when local wheel terrain is rough."""
   stats = _terrain_roughness_from_sensor(
@@ -910,7 +1091,10 @@ def rough_wheel_usage(
     roughness_gate_threshold_ramp_steps,
   )
   rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
-  return rough_active * torch.sum(torch.square(wheel_vel), dim=1)
+  cost = rough_active * torch.sum(torch.square(wheel_vel), dim=1)
+  return _apply_upright_gate(
+    cost, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+  )
 
 
 def rough_wheel_foot_clearance(
@@ -932,6 +1116,8 @@ def rough_wheel_foot_clearance(
   max_target_height: float = 0.18,
   target_std: float = 0.04,
   command_threshold: float = 0.05,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Reward wheel-foot swing clearance toward a roughness-aware local target."""
   stats = _terrain_roughness_from_sensor(
@@ -988,7 +1174,12 @@ def rough_wheel_foot_clearance(
     wheel_foot_clearance.mean()
   )
   log_data["Metrics/rough_wheel_foot_clearance_target_mean"] = target.mean()
-  return reward
+  return _apply_upright_gate(
+    reward,
+    env,
+    upright_gate_hi,
+    upright_gate_start_step=upright_gate_start_step,
+  )
 
 
 def rough_foot_clearance(*args, **kwargs) -> torch.Tensor:
@@ -1009,6 +1200,8 @@ def rough_contact_pattern(
   roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
   command_threshold: float = 0.05,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Reward rough-terrain contact patterns with a negative value for bad modes."""
   stats = _terrain_roughness_from_sensor(
@@ -1043,7 +1236,12 @@ def rough_contact_pattern(
   log_data["Metrics/rough_single_contact_mean"] = (
     (contact_count == 1).float().mean()
   )
-  return reward
+  return _apply_upright_gate(
+    reward,
+    env,
+    upright_gate_hi,
+    upright_gate_start_step=upright_gate_start_step,
+  )
 
 
 def feet_clearance(
@@ -1166,6 +1364,8 @@ def soft_landing(
   sensor_name: str,
   command_name: str | None = None,
   command_threshold: float = 0.05,
+  upright_gate_hi: float | None = None,
+  upright_gate_start_step: int = 0,
 ) -> torch.Tensor:
   """Penalize high impact forces at landing to encourage soft footfalls."""
   contact_sensor: ContactSensor = env.scene[sensor_name]
@@ -1187,7 +1387,12 @@ def soft_landing(
       total_command = linear_norm + angular_norm
       active = (total_command > command_threshold).float()
       cost = cost * active
-  return cost
+  return _apply_upright_gate(
+    cost,
+    env,
+    upright_gate_hi,
+    upright_gate_start_step=upright_gate_start_step,
+  )
 
 
 class variable_posture:
@@ -1255,6 +1460,8 @@ class variable_posture:
     target_joint_pos: dict[str, float] | None = None,
     walking_threshold: float = 0.5,
     running_threshold: float = 1.5,
+    upright_gate_hi: float | None = None,
+    upright_gate_start_step: int = 0,
   ) -> torch.Tensor:
     del std_standing, std_walking, std_running, target_joint_pos  # Unused.
 
@@ -1285,4 +1492,7 @@ class variable_posture:
       desired_joint_pos = self.target_joint_pos
     error_squared = torch.square(current_joint_pos - desired_joint_pos)
 
-    return torch.exp(-torch.mean(error_squared / (std**2), dim=1))
+    reward = torch.exp(-torch.mean(error_squared / (std**2), dim=1))
+    return _apply_upright_gate(
+      reward, env, upright_gate_hi, asset_cfg, upright_gate_start_step
+    )
