@@ -491,7 +491,7 @@ def test_depth_dynamics_uses_joint_optimizer_steps_only() -> None:
 
     def counted_ema_update(*args, **kwargs):
         nonlocal ema_updates
-        assert optimizer_steps == alg.num_learning_epochs * alg.num_mini_batches
+        assert optimizer_steps == ema_updates + 1
         ema_updates += 1
         return original_ema_update(*args, **kwargs)
 
@@ -501,7 +501,7 @@ def test_depth_dynamics_uses_joint_optimizer_steps_only() -> None:
     alg.update()
 
     assert optimizer_steps == alg.num_learning_epochs * alg.num_mini_batches
-    assert ema_updates == 1
+    assert ema_updates == optimizer_steps
 
 
 def test_joint_dynamics_respects_detached_source_encoder() -> None:

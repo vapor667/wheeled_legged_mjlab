@@ -458,6 +458,11 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
             mean_combined_grad_norm += combined_grad_norm
             combined_grad_clip_count += combined_grad_norm > self.max_grad_norm
             self.optimizer.step()
+            if self.latent_dynamics_enabled and self.latent_dynamics_use_ema_target:
+                # Track every online encoder update. Updating only once after the full PPO
+                # epoch makes the configured decay depend on the number of PPO mini-batches
+                # and leaves the target stale for all joint dynamics updates in that epoch.
+                self._raw_actor.update_target_privileged_encoder(self.latent_dynamics_ema_decay)
 
             if collect_update_diagnostics:
                 encoder_update_norm = self._parameter_delta_norm(
@@ -699,7 +704,6 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
                 })
         if self.latent_dynamics_enabled and self.latent_dynamics_use_ema_target:
             loss_dict.update(self._compute_teacher_latent_diagnostics())
-            self._raw_actor.update_target_privileged_encoder(self.latent_dynamics_ema_decay)
         self.storage.clear()
         return loss_dict
 
