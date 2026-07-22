@@ -8,6 +8,7 @@ from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from .commands import UniformVelocityCommandCfg
+from .recovery import recovery_started_fallen
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -59,6 +60,12 @@ def terrain_levels_vel(
     distance < torch.norm(command[env_ids, :2], dim=1) * env.max_episode_length_s * 0.5
   )
   move_down *= ~move_up
+
+  # Recovery episodes measure righting, not locomotion progress. Their mask still
+  # describes the episode that just ended because curriculum runs before reset events.
+  locomotion_episode = ~recovery_started_fallen(env)[env_ids]
+  move_up &= locomotion_episode
+  move_down &= locomotion_episode
 
   # Update terrain levels.
   terrain.update_env_origins(env_ids, move_up, move_down)

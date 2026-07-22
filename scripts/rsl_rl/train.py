@@ -52,6 +52,13 @@ class TrainConfig:
     return TrainConfig(env=env_cfg, agent=agent_cfg)
 
 
+def _sync_env_step_counter_from_runner(env, runner, num_steps_per_env: int) -> int:
+  """Align environment curricula with the iteration restored from a checkpoint."""
+  restored_step = int(runner.current_learning_iteration) * num_steps_per_env
+  env.unwrapped.common_step_counter = restored_step
+  return restored_step
+
+
 def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
   if cuda_visible == "":
@@ -188,6 +195,13 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   if resume_path is not None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     runner.load(str(resume_path))
+    restored_step = _sync_env_step_counter_from_runner(
+      env, runner, cfg.agent.num_steps_per_env
+    )
+    print(
+      "[INFO]: Restored environment curriculum clock to "
+      f"policy step {restored_step}"
+    )
 
   runner.learn(
     num_learning_iterations=cfg.agent.max_iterations, init_at_random_ep_len=True

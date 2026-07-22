@@ -12,6 +12,8 @@ from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 
+from .recovery import set_recovery_started_fallen
+
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
@@ -24,16 +26,32 @@ def reset_root_state_partial_fallen(
     fallen_velocity_range: dict[str, tuple[float, float]] | None = None,
     fallen_fraction: float = 0.3,
     recovery_start_step: int = 0,
+    fallen_fraction_ramp_steps: int = 0,
+    max_fallen_terrain_level: int | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
-    """Reset a random subset with arbitrary attitude and the rest normally."""
+    """Reset an easy-terrain cohort fallen and persist its episode membership."""
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, dtype=torch.int64, device=env.device)
 
-    effective_fraction = (
-        fallen_fraction if env.common_step_counter >= recovery_start_step else 0.0
-    )
+    elapsed_steps = env.common_step_counter - recovery_start_step
+    if elapsed_steps < 0:
+        effective_fraction = 0.0
+    elif fallen_fraction_ramp_steps > 0:
+        ramp = min(float(elapsed_steps) / fallen_fraction_ramp_steps, 1.0)
+        effective_fraction = fallen_fraction * ramp
+    else:
+        effective_fraction = fallen_fraction
+
     fallen_mask = torch.rand(len(env_ids), device=env.device) < effective_fraction
+    if max_fallen_terrain_level is not None:
+        terrain = env.scene.terrain
+        if terrain.cfg.terrain_type == "generator":
+            easy_terrain = (
+                terrain.terrain_levels[env_ids] <= max_fallen_terrain_level
+            )
+            fallen_mask &= easy_terrain
+    set_recovery_started_fallen(env, env_ids, fallen_mask)
     upright_env_ids = env_ids[~fallen_mask]
     fallen_env_ids = env_ids[fallen_mask]
 

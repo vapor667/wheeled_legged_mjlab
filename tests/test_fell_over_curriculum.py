@@ -314,6 +314,8 @@ class DummyTerrainScene:
 
 def test_terrain_curriculum_groups_repeated_flat_columns() -> None:
     env = SimpleNamespace(
+        num_envs=3,
+        device="cpu",
         scene=DummyTerrainScene(),
         command_manager=SimpleNamespace(
             get_command=lambda name: torch.tensor([[1.0, 0.0]]).repeat(3, 1)

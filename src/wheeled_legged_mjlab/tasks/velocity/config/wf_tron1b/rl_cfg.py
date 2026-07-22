@@ -189,7 +189,7 @@ def wf_tron1b_rep_ts_lin_vel_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
         experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_latent64",
         save_interval=200,
         num_steps_per_env=24,
-        max_iterations=30_000,
+        max_iterations=50_000,
         clip_actions=2.0,
         upload_model=False,
     )
@@ -269,15 +269,16 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         latent_dynamics_horizons=(1, 5, 10),
         distribution_cfg={
             "class_name": "GaussianDistribution",
-            "init_std": 1.0,
+            "init_std": 0.5,
             "std_type": "scalar",
+            "std_range": (0.05, 0.8),
         },
     )
     cfg.algorithm = RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.002,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,

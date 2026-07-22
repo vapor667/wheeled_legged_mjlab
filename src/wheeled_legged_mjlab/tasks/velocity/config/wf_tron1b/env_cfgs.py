@@ -108,9 +108,11 @@ RECOVERY_START_STEP = RECOVERY_START_ITERATION * RECOVERY_STEPS_PER_ITERATION
 FELL_OVER_LIMIT_ANGLE_INITIAL = math.radians(65.0)
 FELL_OVER_LIMIT_ANGLE_FINAL = math.radians(95.0)
 FELL_OVER_LIMIT_ANGLE_RAMP_STEPS = RECOVERY_START_STEP
-RECOVERY_FALLEN_FRACTION = 0.3
+RECOVERY_FALLEN_FRACTION = 0.2
+RECOVERY_FALLEN_FRACTION_RAMP_STEPS = 2_000 * RECOVERY_STEPS_PER_ITERATION
+RECOVERY_MAX_FALLEN_TERRAIN_LEVEL = 5
 RECOVERY_UPRIGHT_GATE_HI = 0.6
-RECOVERY_UPRIGHT_THRESHOLD = 0.9
+RECOVERY_UPRIGHT_THRESHOLD = 0.85
 
 
 def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
@@ -527,6 +529,7 @@ def make_commands() -> dict[str, CommandTermCfg]:
 
 def make_events(
     *,
+    rough: bool = False,
     depth: bool = False,
     recovery: bool = False,
     recovery_start_step: int = RECOVERY_START_STEP,
@@ -710,6 +713,12 @@ def make_events(
                 },
                 "fallen_fraction": RECOVERY_FALLEN_FRACTION,
                 "recovery_start_step": recovery_start_step,
+                "fallen_fraction_ramp_steps": (
+                    RECOVERY_FALLEN_FRACTION_RAMP_STEPS
+                ),
+                "max_fallen_terrain_level": (
+                    RECOVERY_MAX_FALLEN_TERRAIN_LEVEL if rough else None
+                ),
             }
         )
         reset_leg_joints = events["reset_leg_joints"]
@@ -1017,7 +1026,7 @@ def make_rewards(
 
         rewards["upward"] = RewardTermCfg(
             func=mdp.upward,
-            weight=1.0,
+            weight=0.25,
             params={
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
                 "recovery_start_step": recovery_start_step,
@@ -1050,20 +1059,21 @@ def make_terminations(
         "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
     }
     terminations["fell_over"] = TerminationTermCfg(
-        func=mdp.bad_orientation_until_step if recovery else mdp.bad_orientation,
+        func=(
+            mdp.bad_orientation_except_recovery
+            if recovery
+            else mdp.bad_orientation
+        ),
         params={"limit_angle": FELL_OVER_LIMIT_ANGLE_INITIAL},
     )
     terminations["illegal_contact"] = TerminationTermCfg(
-        func=mdp.illegal_contact_until_step if recovery else mdp.illegal_contact,
+        func=(
+            mdp.illegal_contact_except_recovery
+            if recovery
+            else mdp.illegal_contact
+        ),
         params={"sensor_name": "illegal_ground_contact"},
     )
-    if recovery:
-        terminations["fell_over"].params["deactivate_after_step"] = (
-            recovery_start_step
-        )
-        terminations["illegal_contact"].params["deactivate_after_step"] = (
-            recovery_start_step
-        )
     if rough:
         terminations["out_of_terrain_bounds"] = TerminationTermCfg(
             func=mdp.out_of_terrain_bounds,
@@ -1113,22 +1123,41 @@ def make_metrics(
         "mean_action_acc": MetricsTermCfg(func=mdp.mean_action_acc),
     }
     if recovery:
+        # Conditional success = success_unconditional / attempt_rate.
+        # Mean successful recovery time = time_success_unconditional /
+        # success_unconditional.
         metrics.update(
             {
-                "recovery_success_rate": MetricsTermCfg(
-                    func=mdp.recovery_success_rate,
+                "upright_time_fraction": MetricsTermCfg(
+                    func=mdp.upright_time_fraction,
                     params={
                         "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
                         "upright_threshold": RECOVERY_UPRIGHT_THRESHOLD,
                         "recovery_start_step": recovery_start_step,
                     },
                 ),
-                "time_to_recover": MetricsTermCfg(
-                    func=mdp.time_to_recover,
+                "recovery_attempt_rate": MetricsTermCfg(
+                    func=mdp.recovery_attempt_rate,
+                    params={"recovery_start_step": recovery_start_step},
+                    reduce="last",
+                ),
+                "recovery_success_unconditional": MetricsTermCfg(
+                    func=mdp.recovery_episode_outcome,
                     params={
                         "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
                         "upright_threshold": RECOVERY_UPRIGHT_THRESHOLD,
                         "recovery_start_step": recovery_start_step,
+                        "output": "success",
+                    },
+                    reduce="last",
+                ),
+                "recovery_time_success_unconditional": MetricsTermCfg(
+                    func=mdp.recovery_episode_outcome,
+                    params={
+                        "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                        "upright_threshold": RECOVERY_UPRIGHT_THRESHOLD,
+                        "recovery_start_step": recovery_start_step,
+                        "output": "success_time",
                     },
                     reduce="last",
                 ),
@@ -1183,6 +1212,7 @@ def make_env_cfg(
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
         events=make_events(
+            rough=rough,
             depth=depth,
             recovery=recovery,
             recovery_start_step=recovery_start_step,
@@ -1238,6 +1268,8 @@ def apply_play_overrides(
     cfg.curriculum = {}
     if recovery:
         cfg.events["reset_base"].params["fallen_fraction"] = 1.0
+        cfg.events["reset_base"].params["fallen_fraction_ramp_steps"] = 0
+        cfg.events["reset_base"].params["max_fallen_terrain_level"] = None
     else:
         cfg.terminations["fell_over"].params["limit_angle"] = (
             FELL_OVER_LIMIT_ANGLE_FINAL

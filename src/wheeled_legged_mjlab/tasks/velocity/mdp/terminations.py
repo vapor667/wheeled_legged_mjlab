@@ -11,6 +11,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 
 from .commands import UniformVelocityCommand
+from .recovery import recovery_started_fallen
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -19,15 +20,14 @@ if TYPE_CHECKING:
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
-def bad_orientation_until_step(
+def bad_orientation_except_recovery(
   env: ManagerBasedRlEnv,
   limit_angle: float,
-  deactivate_after_step: int,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Apply the normal fall termination only before recovery training starts."""
+  """Terminate normal locomotion falls but keep explicit recovery episodes alive."""
   fell_over = _bad_orientation(env, limit_angle=limit_angle, asset_cfg=asset_cfg)
-  return fell_over & (env.common_step_counter < deactivate_after_step)
+  return fell_over & ~recovery_started_fallen(env)
 
 
 def non_finite_physics(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -90,19 +90,18 @@ def illegal_contact(
   return torch.any(data.found, dim=-1)
 
 
-def illegal_contact_until_step(
+def illegal_contact_except_recovery(
   env: ManagerBasedRlEnv,
   sensor_name: str,
-  deactivate_after_step: int,
   force_threshold: float = 10.0,
 ) -> torch.Tensor:
-  """Apply illegal-contact termination only before recovery training starts."""
+  """Terminate normal episodes on contact but exempt the recovery cohort."""
   contact = illegal_contact(
     env,
     sensor_name=sensor_name,
     force_threshold=force_threshold,
   )
-  return contact & (env.common_step_counter < deactivate_after_step)
+  return contact & ~recovery_started_fallen(env)
 
 
 class velocity_direction_deviation:
