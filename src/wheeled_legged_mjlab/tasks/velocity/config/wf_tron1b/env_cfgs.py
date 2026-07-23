@@ -228,6 +228,7 @@ def make_observations(
     rough: bool,
     depth: bool = False,
     lin_vel_representation: bool = False,
+    teacher_student: bool = False,
     async_depth: bool = False,
 ) -> dict[str, ObservationGroupCfg]:
     """Student history uses noisy proprioception; teacher and critic stay clean."""
@@ -395,6 +396,17 @@ def make_observations(
                 enable_corruption=False,
             ),
         }
+        if teacher_student:
+            observations["teacher_lin_vel"] = ObservationGroupCfg(
+                terms={
+                    "base_lin_vel": ObservationTermCfg(
+                        func=mdp.base_lin_vel,
+                        noise=Unoise(n_min=-0.02, n_max=0.02),
+                    )
+                },
+                concatenate_terms=True,
+                enable_corruption=True,
+            )
     else:
         observations = {
             "actor": ObservationGroupCfg(
@@ -1018,6 +1030,7 @@ def make_env_cfg(
     play: bool = False,
     depth: bool = False,
     lin_vel_representation: bool = False,
+    teacher_student: bool = False,
     async_depth: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
@@ -1026,6 +1039,7 @@ def make_env_cfg(
             rough=rough,
             depth=depth,
             lin_vel_representation=lin_vel_representation,
+            teacher_student=teacher_student,
             async_depth=async_depth,
         ),
         actions=make_actions(action_delay=not play),
@@ -1055,6 +1069,8 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         cfg.observations["actor_history"].enable_corruption = False
     if "proprio_history" in cfg.observations:
         cfg.observations["proprio_history"].enable_corruption = False
+    if "teacher_lin_vel" in cfg.observations:
+        cfg.observations["teacher_lin_vel"].enable_corruption = False
     cfg.events.pop("push_robot", None)
     for event_name in ("cam_pos", "cam_pitch", "cam_fovy"):
         cfg.events.pop(event_name, None)
@@ -1123,6 +1139,28 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerB
         play=play,
         depth=True,
         lin_vel_representation=True,
+        async_depth=True,
+    )
+
+
+def wf_tron1b_rough_ts_teacher_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create the privileged teacher environment for staged TS training."""
+    return make_env_cfg(
+        rough=True,
+        play=play,
+        lin_vel_representation=True,
+        teacher_student=True,
+    )
+
+
+def wf_tron1b_rough_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create the asynchronous-depth student environment for staged TS training."""
+    return make_env_cfg(
+        rough=True,
+        play=play,
+        depth=True,
+        lin_vel_representation=True,
+        teacher_student=True,
         async_depth=True,
     )
 

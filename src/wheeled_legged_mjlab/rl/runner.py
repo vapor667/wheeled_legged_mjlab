@@ -7,8 +7,10 @@ import wandb
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx
+from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
-from rsl_rl.models import RepresentationActorCritic, RepresentationVelocityActorCritic
+from rsl_rl.models import DepthLinVelStudentActor, RepresentationActorCritic, RepresentationVelocityActorCritic
+from rsl_rl.runners import DistillationRunner
 
 
 def _action_scale_values(action_term) -> list[float]:
@@ -84,6 +86,21 @@ def get_wheeled_legged_metadata(
                 "student_history_order": "oldest_to_newest",
             }
         )
+    if isinstance(policy, DepthLinVelStudentActor):
+        proprio_history_cfg = env.cfg.observations["proprio_history"]
+        metadata.update(
+            {
+                "policy_input_names": ["proprio_history", "actor_command", "depth", "hidden_state_in"],
+                "policy_output_names": ["actions", "predicted_lin_vel", "hidden_state_out"],
+                "student_observation_names": env.observation_manager.active_terms["proprio_history"],
+                "command_observation_names": env.observation_manager.active_terms["actor_command"],
+                "depth_observation_names": env.observation_manager.active_terms[policy.depth_group],
+                "student_history_length": str(proprio_history_cfg.history_length),
+                "student_history_flatten_dim": str(proprio_history_cfg.flatten_history_dim).lower(),
+                "student_history_order": "oldest_to_newest",
+                "depth_gru_hidden_dim": str(policy.depth_gru_hidden_dim),
+            }
+        )
     return metadata
 
 
@@ -102,6 +119,40 @@ class WheeledLeggedVelocityOnPolicyRunner(VelocityOnPolicyRunner):
                 if self.logger.logger_type == "wandb" and wandb.run
                 else "local"
             )
+            metadata = get_wheeled_legged_metadata(self.env.unwrapped, run_name, self.alg.get_policy())
+            attach_metadata_to_onnx(str(onnx_path), metadata)
+            if self.logger.logger_type in ["wandb"] and self.cfg["upload_model"]:
+                wandb.save(str(onnx_path), base_path=str(policy_dir))
+        except Exception as exc:
+            print(f"[WARN] ONNX export failed (training continues): {exc}")
+
+
+class WheeledLeggedVelocityDistillationRunner(DistillationRunner, MjlabOnPolicyRunner):
+    """mjlab-aware runner for staged teacher-student distillation."""
+
+    env: RslRlVecEnvWrapper
+
+    def __init__(self, env, train_cfg: dict, log_dir: str | None = None, device: str = "cpu") -> None:
+        for model_key in ("student", "teacher"):
+            if model_key not in train_cfg:
+                continue
+            for option in ("cnn_cfg", "distribution_cfg"):
+                if train_cfg[model_key].get(option) is None:
+                    train_cfg[model_key].pop(option, None)
+            if train_cfg[model_key].get("rnn_type") is None:
+                for option in ("rnn_type", "rnn_hidden_dim", "rnn_num_layers"):
+                    train_cfg[model_key].pop(option, None)
+        teacher_checkpoint = train_cfg.get("teacher_checkpoint")
+        super().__init__(env, train_cfg, log_dir, device)
+        if teacher_checkpoint:
+            self.load(str(teacher_checkpoint), load_cfg={"teacher": True, "iteration": False})
+
+    def save(self, path: str, infos=None):
+        MjlabOnPolicyRunner.save(self, path, infos)
+        policy_dir, filename, onnx_path = self._get_export_paths(path)
+        try:
+            self.export_policy_to_onnx(str(policy_dir), filename)
+            run_name = wandb.run.name if self.logger.logger_type == "wandb" and wandb.run else "local"
             metadata = get_wheeled_legged_metadata(self.env.unwrapped, run_name, self.alg.get_policy())
             attach_metadata_to_onnx(str(onnx_path), metadata)
             if self.logger.logger_type in ["wandb"] and self.cfg["upload_model"]:

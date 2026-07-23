@@ -1,7 +1,7 @@
 """RL configuration for WF-TRON1B velocity task."""
 
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import Literal, Tuple
 
 from mjlab.rl import (
     RslRlModelCfg,
@@ -68,6 +68,31 @@ class RslRlDepthRepresentationVelocityPredictorModelCfg(
 
 
 @dataclass
+class RslRlRepresentationVelocityPredictorModelCfg(RslRlRepresentationVelocityModelCfg):
+    """Privileged teacher model with a canonical latent dynamics predictor."""
+
+    latent_dynamics_hidden_dims: Tuple[int, ...] = (128, 256, 256, 128)
+    latent_dynamics_horizons: Tuple[int, ...] = (1, 5, 10)
+    class_name: str = (
+        "rsl_rl.models.representation_velocity_predictor_actor_critic:"
+        "RepresentationVelocityPredictorActorCritic"
+    )
+
+
+@dataclass
+class RslRlDepthLinVelStudentModelCfg(RslRlModelCfg):
+    """Deployable depth student actor for staged teacher-student distillation."""
+
+    encoder_hidden_dims: Tuple[int, ...] = (512, 256, 128)
+    latent_dim: int = 64
+    normalize_latent: bool = True
+    depth_feature_dim: int = 64
+    depth_gru_hidden_dim: int = 64
+    depth_channels: Tuple[int, ...] = (16, 32, 32)
+    class_name: str = "DepthLinVelStudentActor"
+
+
+@dataclass
 class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     """Config for velocity representation teacher-student PPO."""
 
@@ -103,6 +128,35 @@ class RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
         "rsl_rl.algorithms.representation_velocity_predictor_teacher_student_ppo:"
         "RepresentationVelocityPredictorTeacherStudentPPO"
     )
+
+
+@dataclass
+class RslRlStagedTeacherStudentAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """Configuration for stage-2 warm-start and stage-3 DAgger training."""
+
+    training_stage: Literal["warm_start", "dagger"] = "warm_start"
+    gradient_length: int = 12
+    actor_learning_rate: float = 1.0e-3
+    encoder_learning_rate: float = 2.0e-4
+    latent_loss_coef: float = 1.0
+    lin_vel_loss_coef: float = 1.0
+    kl_loss_coef: float = 1.0
+    action_loss_coef: float = 0.2
+    class_name: str = (
+        "rsl_rl.algorithms.staged_teacher_student_distillation:"
+        "StagedTeacherStudentDistillation"
+    )
+
+
+@dataclass
+class RslRlStagedTeacherStudentRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Runner config with separately checkpointed teacher and student models."""
+
+    teacher: RslRlRepresentationVelocityPredictorModelCfg = field(
+        default_factory=RslRlRepresentationVelocityPredictorModelCfg
+    )
+    student: RslRlDepthLinVelStudentModelCfg = field(default_factory=RslRlDepthLinVelStudentModelCfg)
+    teacher_checkpoint: str | None = None
 
 
 def wf_tron1b_ppo_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
@@ -309,6 +363,141 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
     )
     cfg.experiment_name = "wf_tron1b_velocity_rep_ts_lin_vel_depth_predict_latent64"
     return cfg
+
+
+def _wf_tron1b_ts_teacher_model_cfg() -> RslRlRepresentationVelocityPredictorModelCfg:
+    return RslRlRepresentationVelocityPredictorModelCfg(
+        hidden_dims=(512, 256, 256, 128),
+        encoder_hidden_dims=(512, 256, 128),
+        activation="elu",
+        obs_normalization=True,
+        latent_dim=64,
+        normalize_latent=True,
+        latent_dynamics_hidden_dims=(128, 256, 256, 128),
+        latent_dynamics_horizons=(1, 5, 10),
+        distribution_cfg={
+            "class_name": "GaussianDistribution",
+            "init_std": 1.0,
+            "std_type": "scalar",
+        },
+    )
+
+
+def _wf_tron1b_ts_obs_groups() -> dict[str, tuple[str, ...]]:
+    return {
+        "proprio_history": ("proprio_history",),
+        "actor_command": ("actor_command",),
+        "lin_vel_target": ("lin_vel_target",),
+        "teacher_lin_vel": ("teacher_lin_vel",),
+        "critic": ("critic", "dynamics_context"),
+        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
+        "teacher": ("critic", "dynamics_context"),
+        "student_history": ("proprio_history",),
+        "student_command": ("actor_command",),
+        "student_depth": ("depth_camera",),
+    }
+
+
+def _wf_tron1b_ts_teacher_obs_groups() -> dict[str, tuple[str, ...]]:
+    """Observation sets needed by the privileged teacher-only PPO phase."""
+    return {
+        "proprio_history": ("proprio_history",),
+        "actor_command": ("actor_command",),
+        "lin_vel_target": ("lin_vel_target",),
+        "teacher_lin_vel": ("teacher_lin_vel",),
+        "critic": ("critic", "dynamics_context"),
+        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
+    }
+
+
+def wf_tron1b_ts_teacher_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
+    """Train the frozen-before-distillation privileged teacher and its predictor."""
+    return WFTRON1BRslRlOnPolicyRunnerCfg(
+        actor=_wf_tron1b_ts_teacher_model_cfg(),
+        algorithm=RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
+            value_loss_coef=1.0,
+            use_clipped_value_loss=True,
+            clip_param=0.2,
+            entropy_coef=0.01,
+            num_learning_epochs=5,
+            num_mini_batches=4,
+            learning_rate=1.0e-3,
+            predictor_learning_rate=1.0e-3,
+            student_learning_rate=0.0,
+            schedule="adaptive",
+            gamma=0.99,
+            lam=0.95,
+            desired_kl=0.01,
+            max_grad_norm=1.0,
+            num_student_substeps=1,
+            num_representation_epochs=1,
+            num_representation_mini_batches=4,
+            representation_chunk_length=12,
+            representation_loss_coef=0.0,
+            lin_vel_loss_coef=0.0,
+            latent_dynamics_loss_coef=3.0,
+            latent_dynamics_velocity_loss_coef=1.0,
+            latent_dynamics_horizons=(1, 5, 10),
+            latent_dynamics_horizon_weights=(1.0, 0.75, 0.5),
+            latent_rollout_loss_coef=0.75,
+            latent_rollout_horizon=5,
+            num_latent_dynamics_epochs=1,
+            num_latent_dynamics_mini_batches=4,
+            class_name=(
+                "rsl_rl.algorithms.representation_velocity_predictor_teacher_student_ppo:"
+                "RepresentationVelocityPredictorTeacherStudentPPO"
+            ),
+        ),
+        obs_groups=_wf_tron1b_ts_teacher_obs_groups(),
+        experiment_name="wf_tron1b_ts_teacher",
+        save_interval=200,
+        num_steps_per_env=24,
+        max_iterations=30_000,
+        clip_actions=2.0,
+        upload_model=False,
+    )
+
+
+def wf_tron1b_ts_lin_vel_depth_runner_cfg() -> RslRlStagedTeacherStudentRunnerCfg:
+    """Create the stage-2/3 depth student configuration."""
+    return RslRlStagedTeacherStudentRunnerCfg(
+        teacher=_wf_tron1b_ts_teacher_model_cfg(),
+        student=RslRlDepthLinVelStudentModelCfg(
+            hidden_dims=(512, 256, 256, 128),
+            encoder_hidden_dims=(512, 256, 128),
+            activation="elu",
+            obs_normalization=True,
+            latent_dim=64,
+            normalize_latent=True,
+            depth_feature_dim=64,
+            depth_gru_hidden_dim=64,
+            depth_channels=(16, 32, 32),
+            distribution_cfg={
+                "class_name": "GaussianDistribution",
+                "init_std": 1.0,
+                "std_type": "scalar",
+            },
+        ),
+        algorithm=RslRlStagedTeacherStudentAlgorithmCfg(
+            training_stage="warm_start",
+            num_learning_epochs=1,
+            actor_learning_rate=1.0e-3,
+            encoder_learning_rate=2.0e-4,
+            gradient_length=12,
+            latent_loss_coef=1.0,
+            lin_vel_loss_coef=1.0,
+            kl_loss_coef=1.0,
+            action_loss_coef=0.2,
+            max_grad_norm=1.0,
+        ),
+        obs_groups=_wf_tron1b_ts_obs_groups(),
+        experiment_name="wf_tron1b_ts_lin_vel_depth",
+        save_interval=200,
+        num_steps_per_env=24,
+        max_iterations=30_000,
+        clip_actions=2.0,
+        upload_model=False,
+    )
 
 
 def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:

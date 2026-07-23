@@ -10,6 +10,9 @@ uv sync
 
 ### Training
 
+For the independent privileged-teacher / depth-student pipeline, see
+[staged teacher--student training](docs/staged_teacher_student_training.md).
+
 ```shell
 uv run python scripts/rsl_rl/train.py Mjlab-Velocity-Flat-WF-Tron1B  
 ```

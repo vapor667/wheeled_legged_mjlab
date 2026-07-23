@@ -38,6 +38,8 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_env_cfg,
     wf_tron1b_rough_env_cfg,
+    wf_tron1b_rough_ts_lin_vel_depth_env_cfg,
+    wf_tron1b_rough_ts_teacher_env_cfg,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp import observations as observation_mdp
 
@@ -106,6 +108,60 @@ def test_representation_velocity_tasks_are_registered() -> None:
     assert "actor_history" not in flat_env.observations
     assert "dynamics_context" in flat_env.observations
     assert "latent_dynamics_command_generation" not in flat_env.observations
+
+
+def test_staged_teacher_student_tasks_use_noisy_teacher_lin_vel_and_depth_student_inputs() -> None:
+    tasks = set(list_tasks())
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-TS-Teacher" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-TS-LinVel-Depth" in tasks
+
+    teacher_env = wf_tron1b_rough_ts_teacher_env_cfg()
+    student_env = wf_tron1b_rough_ts_lin_vel_depth_env_cfg()
+    teacher_agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-TS-Teacher"))
+    student_agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-TS-LinVel-Depth"))
+
+    teacher_lin_vel = teacher_env.observations["teacher_lin_vel"]
+    teacher_lin_vel_term = teacher_lin_vel.terms["base_lin_vel"]
+    assert teacher_lin_vel.enable_corruption is True
+    assert teacher_lin_vel_term.func is mdp.base_lin_vel
+    assert teacher_lin_vel_term.noise.n_min == -0.02
+    assert teacher_lin_vel_term.noise.n_max == 0.02
+    assert teacher_env.observations["lin_vel_target"].enable_corruption is False
+    assert wf_tron1b_rough_ts_teacher_env_cfg(play=True).observations["teacher_lin_vel"].enable_corruption is False
+
+    assert teacher_agent["actor"]["class_name"].endswith(
+        ":RepresentationVelocityPredictorActorCritic"
+    )
+    assert teacher_agent["algorithm"]["representation_loss_coef"] == 0.0
+    assert teacher_agent["algorithm"]["lin_vel_loss_coef"] == 0.0
+    assert teacher_agent["algorithm"]["latent_dynamics_loss_coef"] == 3.0
+    assert teacher_agent["obs_groups"]["teacher_lin_vel"] == ("teacher_lin_vel",)
+    assert "student_depth" not in teacher_agent["obs_groups"]
+
+    assert student_env.observations[DEPTH_CAMERA_NAME].terms[DEPTH_CAMERA_NAME].func is mdp.async_depth_buffer
+    assert student_agent["teacher"]["class_name"].endswith(
+        ":RepresentationVelocityPredictorActorCritic"
+    )
+    assert student_agent["student"]["class_name"] == "DepthLinVelStudentActor"
+    assert student_agent["algorithm"]["class_name"].endswith(":StagedTeacherStudentDistillation")
+    assert student_agent["algorithm"]["training_stage"] == "warm_start"
+    assert student_agent["algorithm"]["gradient_length"] == 12
+    assert student_agent["algorithm"]["actor_learning_rate"] == 1.0e-3
+    assert student_agent["algorithm"]["encoder_learning_rate"] == 2.0e-4
+    assert student_agent["algorithm"]["latent_loss_coef"] == 1.0
+    assert student_agent["algorithm"]["lin_vel_loss_coef"] == 1.0
+    assert student_agent["algorithm"]["kl_loss_coef"] == 1.0
+    assert student_agent["algorithm"]["action_loss_coef"] == 0.2
+    assert student_agent["obs_groups"]["student_depth"] == (DEPTH_CAMERA_NAME,)
+    assert teacher_agent["max_iterations"] == 30_000
+    assert student_agent["max_iterations"] == 30_000
+
+
+def test_staged_teacher_student_launcher_has_valid_shell_syntax() -> None:
+    launcher = Path(__file__).resolve().parents[1] / "scripts" / "rsl_rl" / "train_staged_teacher_student.sh"
+    result = subprocess.run(["bash", "-n", str(launcher)], check=False, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_actor_history_and_rough_privileged_observations() -> None:
@@ -857,6 +913,8 @@ def test_representation_tests_are_not_git_ignored() -> None:
         "rsl_rl/tests/models/test_representation_velocity_actor_critic.py",
         "rsl_rl/tests/algorithms/test_representation_teacher_student_ppo.py",
         "rsl_rl/tests/algorithms/test_representation_velocity_teacher_student_ppo.py",
+        "rsl_rl/tests/models/test_staged_teacher_student_models.py",
+        "rsl_rl/tests/algorithms/test_staged_teacher_student_distillation.py",
     ]
     result = subprocess.run(
         ["git", "check-ignore", *paths],

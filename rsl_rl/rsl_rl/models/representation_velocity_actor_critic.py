@@ -62,6 +62,17 @@ class RepresentationVelocityActorCritic(nn.Module):
         ) = self._get_history_shape(obs, obs_groups, "proprio_history")
         self.command_obs_groups, self.command_dim = self._get_obs_dim(obs, obs_groups, "actor_command")
         self.lin_vel_target_obs_groups, self.lin_vel_dim = self._get_obs_dim(obs, obs_groups, "lin_vel_target")
+        if "teacher_lin_vel" in obs_groups:
+            self.teacher_lin_vel_obs_groups, teacher_lin_vel_dim = self._get_obs_dim(
+                obs, obs_groups, "teacher_lin_vel"
+            )
+            if teacher_lin_vel_dim != self.lin_vel_dim:
+                raise ValueError(
+                    "teacher_lin_vel must match lin_vel_target dimensionality, got "
+                    f"{teacher_lin_vel_dim} and {self.lin_vel_dim}."
+                )
+        else:
+            self.teacher_lin_vel_obs_groups = None
         self.critic_obs_groups, self.critic_obs_dim = self._get_obs_dim(obs, obs_groups, "critic")
         self.privileged_encoder_obs_groups, self.privileged_encoder_obs_dim = self._get_obs_dim(
             obs, obs_groups, "privileged_encoder"
@@ -135,12 +146,20 @@ class RepresentationVelocityActorCritic(nn.Module):
         hidden_state: HiddenState = None,
         stochastic_output: bool = False,
     ) -> torch.Tensor:
-        """Run PPO with predicted velocity actor inputs and privileged latent."""
+        """Run the privileged teacher actor path.
+
+        A dedicated ``teacher_lin_vel`` observation group, when configured, supplies the
+        noisy ground-truth velocity used during teacher PPO.  Existing representation
+        tasks omit that group and keep their historical predicted-velocity behavior.
+        """
         del hidden_state
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
-        with torch.no_grad():
-            predicted_lin_vel = self.get_predicted_lin_vel(obs)
-        actor_obs = self.get_actor_obs_from_prediction(obs, predicted_lin_vel)
+        if self.teacher_lin_vel_obs_groups is None:
+            with torch.no_grad():
+                actor_lin_vel = self.get_predicted_lin_vel(obs)
+        else:
+            actor_lin_vel = self.get_teacher_lin_vel(obs)
+        actor_obs = self.get_actor_obs_from_prediction(obs, actor_lin_vel)
         latent = self.get_privileged_latent(obs)
         return self._actor(actor_obs, latent, stochastic_output=stochastic_output)
 
@@ -209,6 +228,11 @@ class RepresentationVelocityActorCritic(nn.Module):
 
     def get_lin_vel_target(self, obs: TensorDict) -> torch.Tensor:
         return self._cat_obs(obs, self.lin_vel_target_obs_groups)
+
+    def get_teacher_lin_vel(self, obs: TensorDict) -> torch.Tensor:
+        if self.teacher_lin_vel_obs_groups is None:
+            return self.get_lin_vel_target(obs)
+        return self._cat_obs(obs, self.teacher_lin_vel_obs_groups)
 
     def get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
         return self.critic_obs_normalizer(self._cat_obs(obs, self.critic_obs_groups))
@@ -281,7 +305,7 @@ class RepresentationVelocityActorCritic(nn.Module):
             self.proprio_history_obs_normalizer.update(proprio_history.flatten(start_dim=1))  # type: ignore
             self.current_proprio_obs_normalizer.update(proprio_history[:, -1, :])  # type: ignore
             self.command_obs_normalizer.update(self.get_command(obs))  # type: ignore
-            self.lin_vel_normalizer.update(self.get_lin_vel_target(obs))  # type: ignore
+            self.lin_vel_normalizer.update(self.get_teacher_lin_vel(obs))  # type: ignore
             self.critic_obs_normalizer.update(self._cat_obs(obs, self.critic_obs_groups))  # type: ignore
             self.privileged_obs_normalizer.update(self._cat_obs(obs, self.privileged_encoder_obs_groups))  # type: ignore
 
