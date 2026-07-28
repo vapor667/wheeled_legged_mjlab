@@ -12,6 +12,7 @@ from rsl_rl.models import (
     DepthRepresentationVelocityActorCritic,
     RepresentationActorCritic,
     RepresentationVelocityActorCritic,
+    VisionCTSActorCritic,
 )
 
 
@@ -75,7 +76,22 @@ def get_wheeled_legged_metadata(
                 "student_history_order": "oldest_to_newest",
             }
         )
-    if isinstance(policy, DepthRepresentationVelocityActorCritic):
+    if isinstance(policy, VisionCTSActorCritic):
+        student_history_cfg = env.cfg.observations["actor_history"]
+        metadata.update(
+            {
+                "policy_input_names": ["student_history", "depth", "hidden_state_in"],
+                "policy_output_names": ["actions", "hidden_state_out"],
+                "student_observation_names": env.observation_manager.active_terms["actor_history"],
+                "student_history_length": str(student_history_cfg.history_length),
+                "student_history_flatten_dim": str(student_history_cfg.flatten_history_dim).lower(),
+                "student_history_order": "oldest_to_newest",
+                "depth_observation_name": policy.depth_obs_group,
+                "depth_shape": list(policy.depth_shape),
+                "gru_hidden_size": float(policy.height_gru_hidden_dim),
+            }
+        )
+    elif isinstance(policy, DepthRepresentationVelocityActorCritic):
         proprio_history_cfg = env.cfg.observations["proprio_history"]
         metadata.update(
             {

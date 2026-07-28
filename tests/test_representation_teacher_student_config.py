@@ -8,7 +8,6 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
-import sys
 
 import pytest
 import torch
@@ -25,8 +24,6 @@ from rsl_rl.models import (
 from wheeled_legged_mjlab.rl.runner import get_wheeled_legged_metadata
 from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
-    DEPTH_BUFFER_SIZE,
-    DEPTH_BUFFER_UPDATE_PERIOD,
     DEPTH_CAPTURE_FREQUENCY_HZ,
     DEPTH_CAMERA_ENTITY_NAME,
     DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG,
@@ -42,6 +39,7 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_env_cfg,
     wf_tron1b_rough_env_cfg,
+    wf_tron1b_rough_vision_cts_env_cfg,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp import observations as observation_mdp
 
@@ -182,53 +180,18 @@ def test_representation_velocity_observation_groups() -> None:
     assert "height_scan" in privileged_terms
 
 
-def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
-    cfg = load_env_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth")
-    agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth"))
-
-    depth_group = cfg.observations[DEPTH_CAMERA_NAME]
-    depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
-
-    assert depth_term.func is mdp.depth_buffer
-    assert depth_term.params == {
-        "sensor_name": DEPTH_CAMERA_NAME,
-        "buffer_size": DEPTH_BUFFER_SIZE,
-        "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
-        "left_crop": DEPTH_LEFT_CROP,
-    }
-    depth_sensor = next(
-        sensor for sensor in cfg.scene.sensors if sensor.name == DEPTH_CAMERA_NAME
-    )
-    assert (depth_sensor.height, depth_sensor.width) == (
-        DEPTH_CAMERA_HEIGHT,
-        DEPTH_CAMERA_WIDTH,
-    )
-    assert DEPTH_MODEL_WIDTH == DEPTH_CAMERA_WIDTH - DEPTH_LEFT_CROP == 45
-    assert depth_group.enable_corruption is False
-    _assert_dynamics_context_group(cfg)
-    assert agent["obs_groups"] == {
-        "teacher_actor": ("actor",),
-        "critic": ("critic", "dynamics_context"),
-        "student_history": ("actor_history",),
-        "privileged_encoder": ("critic", "dynamics_context"),
-    }
-    training_obs_groups = {
-        group for groups in agent["obs_groups"].values() for group in groups
-    }
-    assert DEPTH_CAMERA_NAME not in training_obs_groups
-
-
-def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
+def test_vision_cts_replaces_all_previous_depth_task_entries() -> None:
     tasks = set(list_tasks())
 
-    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth" in tasks
-    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-Vision-CTS" in tasks
+    assert not {
+        "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth",
+        "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth",
+        "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict",
+    } & tasks
 
-    cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg()
-    agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"))
-    predict_agent = asdict(
-        load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict")
-    )
+    cfg = wf_tron1b_rough_vision_cts_env_cfg()
+    agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-Vision-CTS"))
     depth_group = cfg.observations[DEPTH_CAMERA_NAME]
     depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
 
@@ -239,92 +202,62 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "system_delay_range_s": DEPTH_SYSTEM_DELAY_RANGE_S,
         "left_crop": DEPTH_LEFT_CROP,
     }
-    assert cfg.observations["wheel_roughness"].terms["wheel_roughness"].func is mdp.wheel_roughness_gate
-    assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
-    assert agent["actor"]["depth_gru_hidden_dim"] == 128
-    assert agent["actor"]["depth_conv_strides"] == (2, 2, 1)
+    assert agent["actor"]["class_name"] == "VisionCTSActorCritic"
+    assert agent["algorithm"]["class_name"] == "VisionCTSConcurrentTeacherStudentPPO"
+    assert agent["actor"]["hidden_dims"] == (512, 256, 256, 128)
+    assert agent["actor"]["latent_dim"] == 32
+    assert agent["actor"]["height_latent_dim"] == 32
     assert agent["algorithm"]["representation_chunk_length"] == 24
-    assert agent["algorithm"]["roughness_loss_coef"] == 0.2
-    assert all("latent_dynamics" not in name for name in agent["actor"])
-    assert all("latent_dynamics" not in name for name in agent["algorithm"])
-    assert all("latent_rollout" not in name for name in agent["algorithm"])
-
-    assert predict_agent["actor"]["class_name"].endswith(
-        ":DepthRepresentationVelocityPredictorActorCritic"
-    )
-    assert predict_agent["actor"]["latent_dynamics_hidden_dims"] == (128, 256, 256, 128)
-    assert predict_agent["actor"]["latent_dynamics_horizons"] == (1, 5, 10)
-    assert predict_agent["algorithm"]["class_name"].endswith(
-        ":RepresentationVelocityPredictorTeacherStudentPPO"
-    )
-    assert predict_agent["algorithm"]["predictor_learning_rate"] == 1.0e-3
-    assert predict_agent["algorithm"]["latent_dynamics_loss_coef"] == 3.0
-    assert predict_agent["algorithm"]["latent_dynamics_velocity_loss_coef"] == 1.0
-    assert predict_agent["algorithm"]["latent_dynamics_use_ema_target"] is False
-    assert predict_agent["algorithm"]["latent_dynamics_ema_decay"] == 0.99
-    assert predict_agent["algorithm"]["latent_dynamics_horizons"] == (1, 5, 10)
-    assert predict_agent["algorithm"]["latent_dynamics_horizon_weights"] == (
-        1.0,
-        0.75,
-        0.5,
-    )
-    assert predict_agent["algorithm"]["latent_dynamics_detach_source"] is False
-    assert predict_agent["algorithm"]["latent_rollout_horizon"] == 5
-    assert predict_agent["algorithm"]["latent_rollout_loss_coef"] == 0.75
-    assert predict_agent["algorithm"]["num_latent_dynamics_epochs"] == 1
-    assert predict_agent["algorithm"]["num_latent_dynamics_mini_batches"] == 4
-    assert "latent_dynamics_command_generation" not in cfg.observations
+    assert agent["algorithm"]["teacher_student_ratio"] == 1.0
     assert agent["obs_groups"] == {
-        "proprio_history": ("proprio_history",),
-        "actor_command": ("actor_command",),
-        "lin_vel_target": ("lin_vel_target",),
+        "teacher_actor": ("actor",),
+        "critic": ("critic", "dynamics_context"),
+        "student_history": ("actor_history",),
+        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
+        "depth_encoder": (DEPTH_CAMERA_NAME,),
+        "height_encoder": ("height_scan",),
+    }
+
+
+def test_vision_cts_observations_keep_current_actor_and_critic_content() -> None:
+    cfg = wf_tron1b_rough_vision_cts_env_cfg()
+
+    assert cfg.observations["actor_history"].history_length == 5
+    assert cfg.observations["actor_history"].enable_corruption is True
+    assert cfg.observations["actor"].enable_corruption is False
+    assert cfg.observations["critic"].enable_corruption is False
+    assert cfg.observations["privileged_encoder"].enable_corruption is False
+    assert cfg.observations["height_scan"].enable_corruption is False
+    _assert_dynamics_context_group(cfg)
+
+    assert "lin_vel_target" not in cfg.observations
+    assert "wheel_roughness" not in cfg.observations
+    assert "base_lin_vel" not in cfg.observations["actor"].terms
+    assert "base_lin_vel" in cfg.observations["critic"].terms
+    assert "command" in cfg.observations["actor"].terms
+    assert "command" in cfg.observations["critic"].terms
+    assert "base_lin_vel" not in cfg.observations["privileged_encoder"].terms
+    assert "command" not in cfg.observations["privileged_encoder"].terms
+    assert set(cfg.observations["height_scan"].terms) == {"height_scan"}
+
+    play_cfg = wf_tron1b_rough_vision_cts_env_cfg(play=True)
+    assert play_cfg.observations["actor_history"].enable_corruption is False
+    assert not {"cam_pos", "cam_pitch", "cam_fovy"} & set(play_cfg.events)
+
+
+def test_vision_cts_runner_uses_only_its_own_observation_interface() -> None:
+    agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-Vision-CTS"))
+
+    assert agent["obs_groups"] == {
+        "teacher_actor": ("actor",),
         "critic": ("critic", "dynamics_context"),
         "privileged_encoder": ("privileged_encoder", "dynamics_context"),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
-        "wheel_roughness": ("wheel_roughness",),
+        "height_encoder": ("height_scan",),
+        "student_history": ("actor_history",),
     }
-    assert predict_agent["obs_groups"] == agent["obs_groups"]
 
 
-def test_plain_depth_task_loads_without_importing_predictor_modules() -> None:
-    script = """
-import builtins
-from dataclasses import asdict
-
-real_import = builtins.__import__
-
-def reject_predictor(name, *args, **kwargs):
-    if "predictor" in name:
-        raise ImportError(f"blocked predictor import: {name}")
-    return real_import(name, *args, **kwargs)
-
-builtins.__import__ = reject_predictor
-
-import wheeled_legged_mjlab
-from mjlab.tasks.registry import load_rl_cfg
-from rsl_rl.utils import resolve_callable
-
-cfg = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"))
-assert cfg["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
-assert cfg["algorithm"]["class_name"] == "RepresentationVelocityTeacherStudentPPO"
-assert not any("latent_dynamics" in key for key in cfg["actor"])
-assert not any("latent_dynamics" in key for key in cfg["algorithm"])
-assert resolve_callable(cfg["actor"]["class_name"]).__module__.endswith(
-    "depth_representation_velocity_actor_critic"
-)
-assert resolve_callable(cfg["algorithm"]["class_name"]).__module__.endswith(
-    "representation_velocity_teacher_student_ppo"
-)
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[1],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
 def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg()
 

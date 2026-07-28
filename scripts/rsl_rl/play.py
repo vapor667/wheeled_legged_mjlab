@@ -124,6 +124,29 @@ def _wrap_predicted_lin_vel_policy(policy, env):
   return _PredictedLinVelPolicy(policy, env)
 
 
+class _AutoResetPolicy:
+  """Reset deployable recurrent policy state after environments auto-reset."""
+
+  def __init__(self, policy, env: RslRlVecEnvWrapper):
+    self.policy = policy
+    self.env = env
+    self.reset()
+
+  def __getattr__(self, name: str):
+    return getattr(self.policy, name)
+
+  def __call__(self, obs) -> torch.Tensor:
+    reset_envs = getattr(self.env.unwrapped, "reset_buf", None)
+    if reset_envs is not None and torch.any(reset_envs) and hasattr(self.policy, "reset"):
+      self.policy.reset(reset_envs)
+    return self.policy(obs)
+
+  def reset(self, *args, **kwargs):
+    if hasattr(self.policy, "reset"):
+      return self.policy.reset(*args, **kwargs)
+    return None
+
+
 def run_play(task_id: str, cfg: PlayConfig):
   configure_torch_backends()
 
@@ -282,7 +305,10 @@ def run_play(task_id: str, cfg: PlayConfig):
     policy = _select_play_policy(
       runner.get_inference_policy(device=device), cfg.policy_role
     )
-  policy = _wrap_predicted_lin_vel_policy(policy, env.unwrapped)
+  policy = _AutoResetPolicy(
+    _wrap_predicted_lin_vel_policy(policy, env.unwrapped),
+    env,
+  )
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
@@ -319,8 +345,11 @@ def run_play(task_id: str, cfg: PlayConfig):
       ckpt_manager = CheckpointManager(
         current_name=resume_path.name,
         fetch_available=fetch_available_local,
-        load_checkpoint=lambda name: _wrap_predicted_lin_vel_policy(
-          _reload_policy(str(ckpt_dir / name)), env.unwrapped
+        load_checkpoint=lambda name: _AutoResetPolicy(
+          _wrap_predicted_lin_vel_policy(
+            _reload_policy(str(ckpt_dir / name)), env.unwrapped
+          ),
+          env,
         ),
       )
     else:
@@ -352,11 +381,14 @@ def run_play(task_id: str, cfg: PlayConfig):
       ckpt_manager = CheckpointManager(
         current_name=resume_path.name,
         fetch_available=fetch_available_wandb,
-        load_checkpoint=lambda name: _wrap_predicted_lin_vel_policy(
-          _reload_policy(
-            str(get_wandb_checkpoint_path(_log_root, Path(run_path), name)[0])
+        load_checkpoint=lambda name: _AutoResetPolicy(
+          _wrap_predicted_lin_vel_policy(
+            _reload_policy(
+              str(get_wandb_checkpoint_path(_log_root, Path(run_path), name)[0])
+            ),
+            env.unwrapped,
           ),
-          env.unwrapped,
+          env,
         ),
         run_name=_parse_wandb_dt(wandb_run.created_at).strftime("%Y-%m-%d_%H-%M-%S"),
         run_url=wandb_run.url,

@@ -11,6 +11,7 @@ from .mlp_model import MLPModel
 from .representation_actor_critic import RepresentationActorCritic
 from .representation_velocity_actor_critic import RepresentationVelocityActorCritic
 from .rnn_model import RNNModel
+from .vision_cts_actor_critic import VisionCTSActorCritic
 
 __all__ = [
     "CNNModel",
@@ -19,4 +20,5 @@ __all__ = [
     "RNNModel",
     "RepresentationActorCritic",
     "RepresentationVelocityActorCritic",
+    "VisionCTSActorCritic",
 ]

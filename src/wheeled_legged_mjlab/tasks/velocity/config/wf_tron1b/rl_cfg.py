@@ -69,6 +69,37 @@ class RslRlDepthRepresentationVelocityPredictorModelCfg(
 
 
 @dataclass
+class RslRlVisionCTSModelCfg(RslRlModelCfg):
+    """Model configuration for the Vision-CTS baseline."""
+
+    encoder_hidden_dims: Tuple[int, ...] = (512, 256, 128)
+    latent_dim: int = 32
+    height_latent_dim: int = 32
+    height_teacher_hidden_dims: Tuple[int, ...] = (512, 256)
+    height_proprio_feature_dim: int = 64
+    height_depth_feature_dim: int = 64
+    height_gru_hidden_dim: int = 128
+    height_proprio_hidden_dims: Tuple[int, ...] = (512, 256)
+    height_depth_channels: Tuple[int, ...] = (16, 32, 32)
+    height_decoder_hidden_dims: Tuple[int, ...] = (256, 512)
+    privileged_decoder_hidden_dims: Tuple[int, ...] = (256, 512)
+    normalize_latent: bool = True
+    class_name: str = "VisionCTSActorCritic"
+
+
+@dataclass
+class RslRlVisionCTSAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """Concurrent teacher-student PPO configuration for Vision-CTS."""
+
+    representation_learning_rate: float = 1.0e-3
+    num_representation_epochs: int = 1
+    num_representation_mini_batches: int = 4
+    representation_chunk_length: int = 24
+    teacher_student_ratio: float = 1.0
+    class_name: str = "VisionCTSConcurrentTeacherStudentPPO"
+
+
+@dataclass
 class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     """Config for velocity representation teacher-student PPO."""
 
@@ -314,6 +345,67 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
     )
     cfg.experiment_name = "wf_tron1b_velocity_rep_ts_lin_vel_depth_predict_latent64"
     return cfg
+
+
+def wf_tron1b_vision_cts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
+    """Create the Vision-CTS baseline runner on the current task settings."""
+    return WFTRON1BRslRlOnPolicyRunnerCfg(
+        actor=RslRlVisionCTSModelCfg(
+            hidden_dims=(512, 256, 256, 128),
+            encoder_hidden_dims=(512, 256, 128),
+            activation="elu",
+            obs_normalization=True,
+            latent_dim=32,
+            height_latent_dim=32,
+            height_teacher_hidden_dims=(512, 256),
+            height_proprio_feature_dim=64,
+            height_depth_feature_dim=64,
+            height_gru_hidden_dim=128,
+            height_proprio_hidden_dims=(512, 256),
+            height_depth_channels=(16, 32, 32),
+            height_decoder_hidden_dims=(256, 512),
+            privileged_decoder_hidden_dims=(256, 512),
+            normalize_latent=True,
+            distribution_cfg={
+                "class_name": "GaussianDistribution",
+                "init_std": 1.0,
+                "std_type": "scalar",
+            },
+        ),
+        algorithm=RslRlVisionCTSAlgorithmCfg(
+            value_loss_coef=1.0,
+            use_clipped_value_loss=True,
+            clip_param=0.2,
+            entropy_coef=0.01,
+            num_learning_epochs=5,
+            num_mini_batches=4,
+            learning_rate=1.0e-3,
+            schedule="adaptive",
+            gamma=0.99,
+            lam=0.95,
+            desired_kl=0.01,
+            max_grad_norm=1.0,
+            representation_learning_rate=1.0e-3,
+            num_representation_epochs=1,
+            num_representation_mini_batches=4,
+            representation_chunk_length=24,
+            teacher_student_ratio=1.0,
+        ),
+        obs_groups={
+            "teacher_actor": ("actor",),
+            "critic": ("critic", "dynamics_context"),
+            "student_history": ("actor_history",),
+            "privileged_encoder": ("privileged_encoder", "dynamics_context"),
+            "depth_encoder": ("depth_camera",),
+            "height_encoder": ("height_scan",),
+        },
+        experiment_name="wf_tron1b_velocity_vision_cts",
+        save_interval=200,
+        num_steps_per_env=24,
+        max_iterations=50_000,
+        clip_actions=2.0,
+        upload_model=False,
+    )
 
 
 def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:

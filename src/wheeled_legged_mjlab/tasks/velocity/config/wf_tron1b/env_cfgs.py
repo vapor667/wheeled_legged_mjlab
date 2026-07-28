@@ -231,8 +231,11 @@ def make_observations(
     depth: bool = False,
     lin_vel_representation: bool = False,
     async_depth: bool = False,
+    vision_cts: bool = False,
 ) -> dict[str, ObservationGroupCfg]:
     """Student history uses noisy proprioception; teacher and critic stay clean."""
+    if vision_cts and lin_vel_representation:
+        raise ValueError("Vision-CTS does not use the linear-velocity representation observations")
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
             func=mdp.builtin_sensor,
@@ -434,6 +437,23 @@ def make_observations(
                 enable_corruption=False,
             ),
         }
+
+    if vision_cts:
+        if not rough:
+            raise ValueError("Vision-CTS requires rough terrain height-scan supervision")
+        privileged_encoder_terms = deepcopy(critic_terms)
+        privileged_encoder_terms.pop("base_lin_vel", None)
+        privileged_encoder_terms.pop("command", None)
+        observations["privileged_encoder"] = ObservationGroupCfg(
+            terms=privileged_encoder_terms,
+            concatenate_terms=True,
+            enable_corruption=False,
+        )
+        observations["height_scan"] = ObservationGroupCfg(
+            terms={"height_scan": deepcopy(critic_terms["height_scan"])},
+            concatenate_terms=True,
+            enable_corruption=False,
+        )
 
     observations["dynamics_context"] = ObservationGroupCfg(
         terms=dynamics_context_terms,
@@ -1062,6 +1082,7 @@ def make_env_cfg(
     depth: bool = False,
     lin_vel_representation: bool = False,
     async_depth: bool = False,
+    vision_cts: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
@@ -1070,6 +1091,7 @@ def make_env_cfg(
             depth=depth,
             lin_vel_representation=lin_vel_representation,
             async_depth=async_depth,
+            vision_cts=vision_cts,
         ),
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
@@ -1167,6 +1189,17 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerB
         depth=True,
         lin_vel_representation=True,
         async_depth=True,
+    )
+
+
+def wf_tron1b_rough_vision_cts_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create the Vision-CTS baseline with the current rough-depth environment."""
+    return make_env_cfg(
+        rough=True,
+        play=play,
+        depth=True,
+        async_depth=True,
+        vision_cts=True,
     )
 
 
