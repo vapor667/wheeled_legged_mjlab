@@ -93,12 +93,14 @@ class VisionCTSActorCritic(nn.Module):
         super().__init__()
         self.teacher_actor_obs_groups, self.teacher_actor_obs_dim = self._get_obs_dim(obs, obs_groups, "teacher_actor")
         self.critic_obs_groups, self.critic_obs_dim = self._get_obs_dim(obs, obs_groups, "critic")
-        self.student_history_obs_groups, self.student_history_length, self.student_actor_obs_dim = (
+        self.student_history_obs_groups, self.student_history_length, self.student_proprio_obs_dim = (
             self._get_history_shape(obs, obs_groups, "student_history")
         )
+        self.actor_command_obs_groups, self.actor_command_obs_dim = self._get_obs_dim(obs, obs_groups, "actor_command")
+        self.student_actor_obs_dim = self.student_proprio_obs_dim + self.actor_command_obs_dim
         if self.student_actor_obs_dim != self.teacher_actor_obs_dim:
             raise ValueError(
-                "VisionCTS requires actor_history frames to match teacher_actor, got "
+                "VisionCTS requires current proprioception plus command to match teacher_actor, got "
                 f"{self.student_actor_obs_dim} and {self.teacher_actor_obs_dim}"
             )
         self.privileged_encoder_obs_groups, self.privileged_encoder_obs_dim = self._get_obs_dim(
@@ -107,7 +109,7 @@ class VisionCTSActorCritic(nn.Module):
         self.height_obs_groups, self.height_dim = self._get_obs_dim(obs, obs_groups, "height_encoder")
         self.depth_obs_group, self.depth_shape = self._get_depth_group_and_shape(obs, obs_groups, "depth_encoder")
 
-        self.proprio_encoder_obs_dim = self.student_history_length * self.student_actor_obs_dim
+        self.proprio_encoder_obs_dim = self.student_history_length * self.student_proprio_obs_dim
         self.latent_dim = latent_dim
         self.height_latent_dim = height_latent_dim
         self.height_gru_hidden_dim = height_gru_hidden_dim
@@ -329,7 +331,9 @@ class VisionCTSActorCritic(nn.Module):
         return self.teacher_actor_obs_normalizer(self._cat_obs(obs, self.teacher_actor_obs_groups))
 
     def get_student_actor_obs(self, obs: TensorDict) -> torch.Tensor:
-        return self.student_actor_obs_normalizer(self._cat_obs(obs, self.student_history_obs_groups)[..., -1, :])
+        current_proprio = self._cat_obs(obs, self.student_history_obs_groups)[..., -1, :]
+        command = self._cat_obs(obs, self.actor_command_obs_groups)
+        return self.student_actor_obs_normalizer(torch.cat((current_proprio, command), dim=-1))
 
     def get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
         return self.critic_obs_normalizer(self._cat_obs(obs, self.critic_obs_groups))
@@ -388,8 +392,12 @@ class VisionCTSActorCritic(nn.Module):
         if not self.obs_normalization:
             return
         student_history = self._cat_obs(obs, self.student_history_obs_groups)
+        student_actor_obs = torch.cat(
+            (student_history[:, -1, :], self._cat_obs(obs, self.actor_command_obs_groups)),
+            dim=-1,
+        )
         self.teacher_actor_obs_normalizer.update(self._cat_obs(obs, self.teacher_actor_obs_groups))  # type: ignore[union-attr]
-        self.student_actor_obs_normalizer.update(student_history[:, -1, :])  # type: ignore[union-attr]
+        self.student_actor_obs_normalizer.update(student_actor_obs)  # type: ignore[union-attr]
         self.critic_obs_normalizer.update(self._cat_obs(obs, self.critic_obs_groups))  # type: ignore[union-attr]
         self.proprio_obs_normalizer.update(student_history.flatten(start_dim=1))  # type: ignore[union-attr]
         self.privileged_obs_normalizer.update(self._cat_obs(obs, self.privileged_encoder_obs_groups))  # type: ignore[union-attr]
@@ -570,15 +578,20 @@ class _OnnxVisionCTSPolicy(nn.Module):
             model.distribution.as_deterministic_output_module() if model.distribution is not None else nn.Identity()
         )
         self.history_length = model.student_history_length
-        self.actor_input_size = model.student_actor_obs_dim
+        self.proprio_input_size = model.student_proprio_obs_dim
+        self.command_input_size = model.actor_command_obs_dim
         self.depth_input_shape = model.depth_shape
         self.hidden_size = model.height_gru_hidden_dim
 
     def forward(
-        self, student_history: torch.Tensor, depth: torch.Tensor, hidden_state_in: torch.Tensor
+        self,
+        proprio_history: torch.Tensor,
+        actor_command: torch.Tensor,
+        depth: torch.Tensor,
+        hidden_state_in: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        actor_obs = self.student_actor_obs_normalizer(student_history[:, -1, :])
-        proprio_obs = self.proprio_obs_normalizer(student_history.flatten(start_dim=1))
+        actor_obs = self.student_actor_obs_normalizer(torch.cat((proprio_history[:, -1, :], actor_command), dim=-1))
+        proprio_obs = self.proprio_obs_normalizer(proprio_history.flatten(start_dim=1))
         privileged_latent = self.proprio_encoder(proprio_obs)
         height_state = self.height_gru(
             torch.cat((self.height_proprio_encoder(proprio_obs), self.depth_encoder(depth)), dim=-1),
@@ -593,16 +606,17 @@ class _OnnxVisionCTSPolicy(nn.Module):
         )
         return actions, height_state
 
-    def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return (
-            torch.zeros(1, self.history_length, self.actor_input_size),
+            torch.zeros(1, self.history_length, self.proprio_input_size),
+            torch.zeros(1, self.command_input_size),
             torch.zeros(1, *self.depth_input_shape),
             torch.zeros(1, self.hidden_size),
         )
 
     @property
     def input_names(self) -> list[str]:
-        return ["student_history", "depth", "hidden_state_in"]
+        return ["proprio_history", "actor_command", "depth", "hidden_state_in"]
 
     @property
     def output_names(self) -> list[str]:

@@ -271,6 +271,7 @@ class VisionCTSConcurrentTeacherStudentPPO(RepresentationTeacherStudentPPO):
             "teacher_actor",
             "critic",
             "student_history",
+            "actor_command",
             "privileged_encoder",
             "depth_encoder",
             "height_encoder",

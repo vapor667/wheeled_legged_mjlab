@@ -20,6 +20,7 @@ from rsl_rl.models import (
     DepthRepresentationVelocityActorCritic,
     RepresentationActorCritic,
     RepresentationVelocityActorCritic,
+    VisionCTSActorCritic,
 )
 from wheeled_legged_mjlab.rl.runner import get_wheeled_legged_metadata
 from wheeled_legged_mjlab.tasks.velocity import mdp
@@ -212,8 +213,9 @@ def test_vision_cts_replaces_all_previous_depth_task_entries() -> None:
     assert agent["obs_groups"] == {
         "teacher_actor": ("actor",),
         "critic": ("critic", "dynamics_context"),
-        "student_history": ("actor_history",),
-        "privileged_encoder": ("privileged_encoder",),
+        "student_history": ("proprio_history",),
+        "actor_command": ("actor_command",),
+        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
         "height_encoder": ("height_scan",),
     }
@@ -222,8 +224,10 @@ def test_vision_cts_replaces_all_previous_depth_task_entries() -> None:
 def test_vision_cts_observations_keep_current_actor_and_critic_content() -> None:
     cfg = wf_tron1b_rough_vision_cts_env_cfg()
 
-    assert cfg.observations["actor_history"].history_length == 5
-    assert cfg.observations["actor_history"].enable_corruption is True
+    assert cfg.observations["proprio_history"].history_length == 5
+    assert cfg.observations["proprio_history"].enable_corruption is True
+    assert "command" not in cfg.observations["proprio_history"].terms
+    assert set(cfg.observations["actor_command"].terms) == {"command"}
     assert cfg.observations["actor"].enable_corruption is False
     assert cfg.observations["critic"].enable_corruption is False
     assert cfg.observations["privileged_encoder"].enable_corruption is False
@@ -236,25 +240,38 @@ def test_vision_cts_observations_keep_current_actor_and_critic_content() -> None
     assert "base_lin_vel" in cfg.observations["critic"].terms
     assert "command" in cfg.observations["actor"].terms
     assert "command" in cfg.observations["critic"].terms
-    privileged_terms = cfg.observations["privileged_encoder"].terms
-    assert set(privileged_terms) == {
-        "base_lin_vel",
+    assert not {
         "joint_torques",
         "joint_accelerations",
-        "wheel_contact_forces",
         "external_force",
+    } & set(cfg.observations["critic"].terms)
+    privileged_terms = cfg.observations["privileged_encoder"].terms
+    assert set(privileged_terms) == {
+        "base_ang_vel",
+        "projected_gravity",
+        "joint_pos",
+        "joint_vel",
+        "wheel_vel",
+        "actions",
+        "wheel_contact",
+        "wheel_contact_forces",
+        "wheel_height",
+        "roughness_indicator",
     }
-    assert privileged_terms["base_lin_vel"].func is mdp.base_lin_vel
-    assert privileged_terms["joint_torques"].func is mdp.joint_actuator_forces
-    assert privileged_terms["joint_accelerations"].func is mdp.joint_accelerations
     assert privileged_terms["wheel_contact_forces"].func is mdp.foot_contact_forces
-    assert privileged_terms["external_force"].func is mdp.body_external_force_b
     assert "height_scan" not in privileged_terms
+    assert "base_lin_vel" not in privileged_terms
+    assert "command" not in privileged_terms
     assert "domain_randomization_delta_quantity" not in privileged_terms
     assert set(cfg.observations["height_scan"].terms) == {"height_scan"}
+    our_method_cfg = wf_tron1b_rough_rep_ts_lin_vel_env_cfg()
+    our_method_non_height_terms = set(
+        our_method_cfg.observations["privileged_encoder"].terms
+    ) - {"height_scan"}
+    assert set(privileged_terms) == our_method_non_height_terms
 
     play_cfg = wf_tron1b_rough_vision_cts_env_cfg(play=True)
-    assert play_cfg.observations["actor_history"].enable_corruption is False
+    assert play_cfg.observations["proprio_history"].enable_corruption is False
     assert not {"cam_pos", "cam_pitch", "cam_fovy"} & set(play_cfg.events)
 
 
@@ -264,10 +281,11 @@ def test_vision_cts_runner_uses_only_its_own_observation_interface() -> None:
     assert agent["obs_groups"] == {
         "teacher_actor": ("actor",),
         "critic": ("critic", "dynamics_context"),
-        "privileged_encoder": ("privileged_encoder",),
+        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
         "height_encoder": ("height_scan",),
-        "student_history": ("actor_history",),
+        "student_history": ("proprio_history",),
+        "actor_command": ("actor_command",),
     }
 
 
@@ -587,7 +605,6 @@ def test_vision_cts_privileged_dynamics_observations() -> None:
     robot = SimpleNamespace(
         data=SimpleNamespace(
             qfrc_actuator=torch.tensor([[1.0, 2.0, 3.0]]),
-            joint_acc=torch.tensor([[4.0, 5.0, 6.0]]),
             body_external_force=torch.tensor([[[1.0, 0.0, 0.0]]]),
             body_link_quat_w=yaw_90_quat_w,
         )
@@ -596,11 +613,9 @@ def test_vision_cts_privileged_dynamics_observations() -> None:
     asset_cfg = SimpleNamespace(name="robot", joint_ids=[0, 2], body_ids=[0])
 
     joint_torques = observation_mdp.joint_actuator_forces(env, asset_cfg)
-    joint_accelerations = observation_mdp.joint_accelerations(env, asset_cfg)
     external_force = observation_mdp.body_external_force_b(env, asset_cfg)
 
     assert torch.equal(joint_torques, torch.tensor([[1.0, 3.0]]))
-    assert torch.equal(joint_accelerations, torch.tensor([[4.0, 6.0]]))
     assert torch.allclose(
         external_force, torch.tensor([[0.0, -1.0, 0.0]]), atol=1.0e-6
     )
@@ -748,6 +763,90 @@ def _make_depth_velocity_representation_policy() -> DepthRepresentationVelocityA
     )
 
 
+def _make_vision_cts_obs() -> TensorDict:
+    return TensorDict(
+        {
+            "actor": torch.randn(2, 6),
+            "proprio_history": torch.randn(2, 5, 3),
+            "actor_command": torch.randn(2, 3),
+            "critic": torch.randn(2, 5),
+            "privileged_encoder": torch.randn(2, 4),
+            "dynamics_context": torch.randn(2, 13),
+            "depth_camera": torch.randn(2, 1, 16, 16),
+            "height_scan": torch.randn(2, 25),
+        },
+        batch_size=[2],
+    )
+
+
+def _make_vision_cts_policy(obs: TensorDict | None = None) -> VisionCTSActorCritic:
+    obs = _make_vision_cts_obs() if obs is None else obs
+    return VisionCTSActorCritic(
+        obs,
+        {
+            "teacher_actor": ["actor"],
+            "critic": ["critic", "dynamics_context"],
+            "student_history": ["proprio_history"],
+            "actor_command": ["actor_command"],
+            "privileged_encoder": ["privileged_encoder", "dynamics_context"],
+            "depth_encoder": ["depth_camera"],
+            "height_encoder": ["height_scan"],
+        },
+        output_dim=2,
+        hidden_dims=[8],
+        encoder_hidden_dims=[8],
+        latent_dim=4,
+        height_latent_dim=4,
+        height_teacher_hidden_dims=[8],
+        height_proprio_feature_dim=4,
+        height_depth_feature_dim=4,
+        height_gru_hidden_dim=4,
+        height_proprio_hidden_dims=[8],
+        height_depth_channels=(4,),
+        height_decoder_hidden_dims=[8],
+        privileged_decoder_hidden_dims=[8],
+        distribution_cfg={"class_name": "GaussianDistribution"},
+    )
+
+
+def test_vision_cts_separates_proprio_command_and_has_no_linear_velocity_input() -> None:
+    obs = _make_vision_cts_obs()
+    policy = _make_vision_cts_policy(obs)
+    changed_command_obs = obs.clone()
+    changed_command_obs["actor_command"] = torch.randn_like(obs["actor_command"])
+
+    assert policy.teacher_actor_obs_dim == policy.student_actor_obs_dim == 6
+    assert policy.student_proprio_obs_dim == 3
+    assert policy.actor_command_obs_dim == 3
+    assert policy.proprio_encoder_obs_dim == 15
+    assert torch.equal(
+        policy.get_proprio_obs(obs), obs["proprio_history"].flatten(start_dim=1)
+    )
+    assert torch.equal(
+        policy.get_proprio_obs(obs), policy.get_proprio_obs(changed_command_obs)
+    )
+    assert torch.equal(
+        policy.get_student_actor_obs(obs),
+        torch.cat((obs["proprio_history"][:, -1, :], obs["actor_command"]), dim=-1),
+    )
+    assert not hasattr(policy, "lin_vel_head")
+    onnx_policy = policy.as_onnx()
+    assert "predicted_lin_vel" not in onnx_policy.output_names
+    hidden_state = torch.zeros(2, policy.height_gru_hidden_dim)
+    expected_actions = policy(obs, hidden_state=hidden_state)
+    actions, hidden_state_out = onnx_policy(
+        obs["proprio_history"],
+        obs["actor_command"],
+        obs["depth_camera"],
+        hidden_state,
+    )
+    assert torch.allclose(actions, expected_actions)
+    assert hidden_state_out.shape == hidden_state.shape
+    dummy_inputs = onnx_policy.get_dummy_inputs()
+    assert dummy_inputs[0].shape == (1, 5, 3)
+    assert dummy_inputs[1].shape == (1, 3)
+
+
 def test_representation_metadata_describes_single_history_input() -> None:
     metadata = get_wheeled_legged_metadata(_make_dummy_metadata_env(), "local", _make_representation_policy())
 
@@ -787,6 +886,23 @@ def test_depth_velocity_representation_metadata_matches_onnx_io() -> None:
 
     assert metadata["policy_input_names"] == onnx_policy.input_names
     assert metadata["policy_output_names"] == onnx_policy.output_names
+
+
+def test_vision_cts_metadata_matches_separated_proprio_and_command_inputs() -> None:
+    policy = _make_vision_cts_policy()
+    metadata = get_wheeled_legged_metadata(
+        _make_velocity_metadata_env(), "local", policy
+    )
+    onnx_policy = policy.as_onnx(verbose=False)
+
+    assert metadata["policy_input_names"] == onnx_policy.input_names
+    assert metadata["policy_output_names"] == onnx_policy.output_names
+    assert metadata["student_observation_names"] == [
+        "base_ang_vel",
+        "projected_gravity",
+    ]
+    assert metadata["command_observation_names"] == ["command"]
+    assert "predicted_lin_vel" not in metadata["policy_output_names"]
 
 
 def test_non_representation_metadata_stays_legacy_shape() -> None:

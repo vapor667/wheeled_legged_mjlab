@@ -81,15 +81,6 @@ def joint_actuator_forces(
   return asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
 
 
-def joint_accelerations(
-  env: ManagerBasedRlEnv,
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-  """Ground-truth accelerations for the selected joints."""
-  asset = env.scene[asset_cfg.name]
-  return asset.data.joint_acc[:, asset_cfg.joint_ids]
-
-
 def body_external_force_b(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
