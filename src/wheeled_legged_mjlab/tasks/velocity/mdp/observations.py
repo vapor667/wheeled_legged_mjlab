@@ -72,6 +72,35 @@ def foot_contact_forces(
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
 
 
+def joint_actuator_forces(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Actuator-produced generalized forces for the selected joints."""
+  asset = env.scene[asset_cfg.name]
+  return asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+
+
+def joint_accelerations(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Ground-truth accelerations for the selected joints."""
+  asset = env.scene[asset_cfg.name]
+  return asset.data.joint_acc[:, asset_cfg.joint_ids]
+
+
+def body_external_force_b(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Applied external forces on selected bodies, expressed in each body frame."""
+  asset = env.scene[asset_cfg.name]
+  forces_w = asset.data.body_external_force[:, asset_cfg.body_ids, :]
+  body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+  return quat_apply_inverse(body_quat_w, forces_w).flatten(start_dim=1)
+
+
 def depth_image(
   env: ManagerBasedRlEnv,
   sensor_name: str = "depth_camera",

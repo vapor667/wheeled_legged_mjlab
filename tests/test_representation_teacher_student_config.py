@@ -213,7 +213,7 @@ def test_vision_cts_replaces_all_previous_depth_task_entries() -> None:
         "teacher_actor": ("actor",),
         "critic": ("critic", "dynamics_context"),
         "student_history": ("actor_history",),
-        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
+        "privileged_encoder": ("privileged_encoder",),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
         "height_encoder": ("height_scan",),
     }
@@ -236,8 +236,21 @@ def test_vision_cts_observations_keep_current_actor_and_critic_content() -> None
     assert "base_lin_vel" in cfg.observations["critic"].terms
     assert "command" in cfg.observations["actor"].terms
     assert "command" in cfg.observations["critic"].terms
-    assert "base_lin_vel" not in cfg.observations["privileged_encoder"].terms
-    assert "command" not in cfg.observations["privileged_encoder"].terms
+    privileged_terms = cfg.observations["privileged_encoder"].terms
+    assert set(privileged_terms) == {
+        "base_lin_vel",
+        "joint_torques",
+        "joint_accelerations",
+        "wheel_contact_forces",
+        "external_force",
+    }
+    assert privileged_terms["base_lin_vel"].func is mdp.base_lin_vel
+    assert privileged_terms["joint_torques"].func is mdp.joint_actuator_forces
+    assert privileged_terms["joint_accelerations"].func is mdp.joint_accelerations
+    assert privileged_terms["wheel_contact_forces"].func is mdp.foot_contact_forces
+    assert privileged_terms["external_force"].func is mdp.body_external_force_b
+    assert "height_scan" not in privileged_terms
+    assert "domain_randomization_delta_quantity" not in privileged_terms
     assert set(cfg.observations["height_scan"].terms) == {"height_scan"}
 
     play_cfg = wf_tron1b_rough_vision_cts_env_cfg(play=True)
@@ -251,7 +264,7 @@ def test_vision_cts_runner_uses_only_its_own_observation_interface() -> None:
     assert agent["obs_groups"] == {
         "teacher_actor": ("actor",),
         "critic": ("critic", "dynamics_context"),
-        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
+        "privileged_encoder": ("privileged_encoder",),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
         "height_encoder": ("height_scan",),
         "student_history": ("actor_history",),
@@ -565,6 +578,32 @@ def test_foot_contact_forces_are_rotated_to_body_frame() -> None:
         [[0.0, -math.log1p(1.0), 0.0, math.log1p(2.0), 0.0, 0.0]]
     )
     assert torch.allclose(obs, expected, atol=1.0e-6)
+
+
+def test_vision_cts_privileged_dynamics_observations() -> None:
+    yaw_90_quat_w = torch.tensor(
+        [[[math.cos(math.pi / 4.0), 0.0, 0.0, math.sin(math.pi / 4.0)]]]
+    )
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            qfrc_actuator=torch.tensor([[1.0, 2.0, 3.0]]),
+            joint_acc=torch.tensor([[4.0, 5.0, 6.0]]),
+            body_external_force=torch.tensor([[[1.0, 0.0, 0.0]]]),
+            body_link_quat_w=yaw_90_quat_w,
+        )
+    )
+    env = SimpleNamespace(scene={"robot": robot})
+    asset_cfg = SimpleNamespace(name="robot", joint_ids=[0, 2], body_ids=[0])
+
+    joint_torques = observation_mdp.joint_actuator_forces(env, asset_cfg)
+    joint_accelerations = observation_mdp.joint_accelerations(env, asset_cfg)
+    external_force = observation_mdp.body_external_force_b(env, asset_cfg)
+
+    assert torch.equal(joint_torques, torch.tensor([[1.0, 3.0]]))
+    assert torch.equal(joint_accelerations, torch.tensor([[4.0, 6.0]]))
+    assert torch.allclose(
+        external_force, torch.tensor([[0.0, -1.0, 0.0]]), atol=1.0e-6
+    )
 
 
 def _make_dummy_metadata_env():

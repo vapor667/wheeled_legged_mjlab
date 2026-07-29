@@ -361,6 +361,36 @@ def make_observations(
             },
         )
 
+    if vision_cts:
+        critic_terms.update(
+            {
+                "joint_torques": ObservationTermCfg(
+                    func=mdp.joint_actuator_forces,
+                    params={
+                        "asset_cfg": SceneEntityCfg(
+                            ROBOT_ENTITY, joint_names=ALL_JOINT_NAMES
+                        )
+                    },
+                ),
+                "joint_accelerations": ObservationTermCfg(
+                    func=mdp.joint_accelerations,
+                    params={
+                        "asset_cfg": SceneEntityCfg(
+                            ROBOT_ENTITY, joint_names=ALL_JOINT_NAMES
+                        )
+                    },
+                ),
+                "external_force": ObservationTermCfg(
+                    func=mdp.body_external_force_b,
+                    params={
+                        "asset_cfg": SceneEntityCfg(
+                            ROBOT_ENTITY, body_names=(BASE_BODY,)
+                        )
+                    },
+                ),
+            }
+        )
+
     dynamics_context_terms = {
         "domain_randomization_delta_quantity": ObservationTermCfg(
             func=mdp.domain_randomization_delta_quantity,
@@ -441,9 +471,16 @@ def make_observations(
     if vision_cts:
         if not rough:
             raise ValueError("Vision-CTS requires rough terrain height-scan supervision")
-        privileged_encoder_terms = deepcopy(critic_terms)
-        privileged_encoder_terms.pop("base_lin_vel", None)
-        privileged_encoder_terms.pop("command", None)
+        privileged_encoder_terms = {
+            name: deepcopy(critic_terms[name])
+            for name in (
+                "base_lin_vel",
+                "joint_torques",
+                "joint_accelerations",
+                "wheel_contact_forces",
+                "external_force",
+            )
+        }
         observations["privileged_encoder"] = ObservationGroupCfg(
             terms=privileged_encoder_terms,
             concatenate_terms=True,
@@ -954,7 +991,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "non_rough_base_ang_vel_xy": RewardTermCfg(
                     func=mdp.non_rough_base_ang_vel_xy,
-                    weight=-0.15,
+                    weight=-0.0,
                     params={
                         **roughness_params,
                         "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),

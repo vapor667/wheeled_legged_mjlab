@@ -395,7 +395,7 @@ def wf_tron1b_vision_cts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             "teacher_actor": ("actor",),
             "critic": ("critic", "dynamics_context"),
             "student_history": ("actor_history",),
-            "privileged_encoder": ("privileged_encoder", "dynamics_context"),
+            "privileged_encoder": ("privileged_encoder",),
             "depth_encoder": ("depth_camera",),
             "height_encoder": ("height_scan",),
         },
