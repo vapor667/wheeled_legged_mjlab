@@ -148,18 +148,18 @@ def test_interleaved_terrain_columns_preserve_logical_proportions() -> None:
         0.28,
     )
     assert math.isclose(sum(cfg.proportion for cfg in sub_terrains.values()), 1.0)
-    for name in ("discrete_obstacles", "random_rough"):
-        assert math.isclose(sub_terrains[name].proportion, 0.10)
+    assert math.isclose(sub_terrains["discrete_obstacles"].proportion, 0.10)
+    assert math.isclose(sub_terrains["random_rough"].proportion, 0.08)
     for name in (
         "hf_pyramid_slope",
         "hf_pyramid_slope_inv",
         "pyramid_stair",
         "random_stairs",
         "tilted_grid",
-        "random_spread",
     ):
         assert math.isclose(sub_terrains[name].proportion, 0.05)
     assert math.isclose(sub_terrains["pyramid_stair_inv"].proportion, 0.15)
+    assert math.isclose(sub_terrains["random_spread"].proportion, 0.07)
     assert math.isclose(sub_terrains["stepping_stones"].proportion, 0.07)
 
     stepping_stones = sub_terrains["stepping_stones"]
@@ -181,16 +181,16 @@ def test_interleaved_terrain_columns_preserve_logical_proportions() -> None:
 
     random_stairs = sub_terrains["random_stairs"]
     assert random_stairs.step_width == 0.35
-    assert random_stairs.step_height_range == (0.03, 0.20)
+    assert random_stairs.step_height_range == (0.03, 0.25)
 
     tilted_grid = sub_terrains["tilted_grid"]
     assert tilted_grid.grid_width == 0.6
-    assert tilted_grid.tilt_range_deg == 12.0
-    assert tilted_grid.height_range == 0.12
+    assert tilted_grid.tilt_range_deg == 15.0
+    assert tilted_grid.height_range == 0.15
 
     random_spread = sub_terrains["random_spread"]
     assert random_spread.num_boxes == 64
-    assert random_spread.box_height_range == (0.03, 0.22)
+    assert random_spread.box_height_range == (0.03, 0.25)
 
 
 def test_play_config_uses_all_interleaved_terrain_columns() -> None:
@@ -422,7 +422,7 @@ def test_non_rough_flat_orientation_replaces_base_ang_vel_reward() -> None:
     assert "non_rough_base_ang_vel_xy" not in cfg.rewards
     term = cfg.rewards["non_rough_flat_orientation"]
     assert term.func is reward_terms.non_rough_flat_orientation
-    assert math.isclose(term.weight, -20.0)
+    assert math.isclose(term.weight, -10.0)
     assert term.params["roll_weight"] == 2.0
     assert term.params["pitch_weight"] == 1.0
 
